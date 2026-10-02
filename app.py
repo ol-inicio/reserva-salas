@@ -21,8 +21,12 @@ CLAVE_VALIDA = "grupool"
 ZONA = ZoneInfo("America/Lima")
 
 
+def ahora():
+    return datetime.datetime.now(ZONA)
+
+
 def hoy():
-    return datetime.datetime.now(ZONA).date()
+    return ahora().date()
 
 
 # Bloques de 30 min: 08:00 -> 20:00
@@ -85,12 +89,24 @@ def reservas_del_dia(fecha):
 
 
 # ------------------------------------------------------------------
-# Login
+# Estado inicial (siempre con la fecha de Lima, no la del servidor)
 # ------------------------------------------------------------------
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
 
+if "fecha_res" not in st.session_state or st.session_state.fecha_res < hoy():
+    st.session_state.fecha_res = hoy()
+if "fecha_cons" not in st.session_state:
+    st.session_state.fecha_cons = hoy()
+if "panel_otra" not in st.session_state:
+    st.session_state.panel_otra = hoy()
+if "panel_modo" not in st.session_state:
+    st.session_state.panel_modo = "Hoy"
 
+
+# ------------------------------------------------------------------
+# Login
+# ------------------------------------------------------------------
 def pantalla_login():
     _, centro, _ = st.columns([1, 1, 1])
     with centro:
@@ -115,23 +131,40 @@ if not st.session_state.autenticado:
     pantalla_login()
     st.stop()
 
+
 # ------------------------------------------------------------------
-# Panel en vivo (se actualiza solo cada 10 segundos)
+# Panel en vivo (se actualiza solo cada 10 segundos y al reservar)
 # ------------------------------------------------------------------
 @st.fragment(run_every="10s")
 def panel_en_vivo():
     st.markdown(
         f"<h3 style='color:{NARANJA};margin-bottom:0;'>🔴 Reservas en vivo</h3>",
         unsafe_allow_html=True)
-    fecha_panel = st.date_input("Fecha del panel", hoy(), key="fecha_panel")
-    st.caption(f"Actualizado: {datetime.datetime.now(ZONA).strftime('%H:%M:%S')} (cada 10 s)")
+
+    modo = st.radio("Ver día", ["Hoy", "Mañana", "Otra fecha"],
+                    horizontal=True, key="panel_modo")
+
+    # La fecha se recalcula en cada actualización: a las 00:00 (Lima)
+    # "Hoy" pasa automáticamente al día nuevo y empieza desde cero.
+    if modo == "Hoy":
+        fecha_panel = hoy()
+    elif modo == "Mañana":
+        fecha_panel = hoy() + datetime.timedelta(days=1)
+    else:
+        fecha_panel = st.date_input("Fecha", key="panel_otra")
+
+    st.markdown(
+        f"<b style='color:{AZUL};'>{fecha_panel.strftime('%d/%m/%Y')}</b> "
+        f"<span style='opacity:.6;font-size:12px;'>· actualizado {ahora().strftime('%H:%M:%S')} (cada 10 s)</span>",
+        unsafe_allow_html=True)
 
     df = reservas_del_dia(fecha_panel)
 
     filas = ""
     # Cada fila = un bloque de 30 min (08:00 ... 19:30)
     for h in HORAS[:-1]:
-        celdas = f"<td style='padding:6px 8px;font-weight:bold;color:{AZUL};white-space:nowrap;border-bottom:1px solid #8884;'>{h}</td>"
+        celdas = (f"<td style='padding:6px 8px;font-weight:bold;color:{AZUL};"
+                  f"white-space:nowrap;border-bottom:1px solid #8884;'>{h}</td>")
         for sala in SALAS:
             ocupado = df[(df["sala"] == sala) & (df["inicio"] <= h) & (df["fin"] > h)]
             if ocupado.empty:
@@ -220,11 +253,22 @@ with col_izq:
                       nombre_usuario.strip().upper(), area_usuario.strip().upper()))
                 conn.commit()
                 conn.close()
+
+                # Hacer que el panel en vivo muestre al instante el día reservado
+                if fecha_reserva == hoy():
+                    st.session_state.panel_modo = "Hoy"
+                elif fecha_reserva == hoy() + datetime.timedelta(days=1):
+                    st.session_state.panel_modo = "Mañana"
+                else:
+                    st.session_state.panel_modo = "Otra fecha"
+                    st.session_state.panel_otra = fecha_reserva
+                st.session_state.fecha_cons = fecha_reserva
+
                 st.success(f"✅ ¡Reserva realizada con éxito en la {sala_seleccionada} para {nombre_usuario.upper()}!")
 
     with tab2:
         st.subheader(f"Reservas programadas en: {sala_seleccionada}")
-        fecha_consulta = st.date_input("Filtrar por Fecha", hoy(), key="fecha_cons")
+        fecha_consulta = st.date_input("Filtrar por Fecha", key="fecha_cons")
 
         conn = sqlite3.connect(DB)
         df = pd.read_sql_query('''
