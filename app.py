@@ -19,7 +19,7 @@ st.markdown(
 AZUL = "#1F4E9C"
 NARANJA = "#FF5A00"
 DB = "reservas.db"
-SALAS = ["Sala Segundo Piso", "Sala Tercer Piso", "Sala Septimo Piso"]
+SALAS = ["Sala Segundo Piso", "Sala Tercer Piso", "Sala Septimo Piso", "Sala Piso 5"]
 
 USUARIO_VALIDO = "admin"
 CLAVE_VALIDA = "grupool"
@@ -139,7 +139,7 @@ if "panel_modo" not in st.session_state:
 
 
 # ------------------------------------------------------------------
-# Login
+# Login (funciona con el botón o presionando Enter)
 # ------------------------------------------------------------------
 def pantalla_login():
     _, centro, _ = st.columns([1, 1, 1])
@@ -151,9 +151,11 @@ def pantalla_login():
         st.markdown(
             f"<h2 style='text-align:center;color:{AZUL};'>Ingreso al sistema</h2>",
             unsafe_allow_html=True)
-        usuario = st.text_input("Usuario")
-        clave = st.text_input("Clave", type="password")
-        if st.button("Ingresar", type="primary", use_container_width=True):
+        with st.form("form_login"):
+            usuario = st.text_input("Usuario")
+            clave = st.text_input("Clave", type="password")
+            enviar = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
+        if enviar:
             if usuario == USUARIO_VALIDO and clave == CLAVE_VALIDA:
                 st.session_state.autenticado = True
                 st.rerun()
@@ -253,8 +255,11 @@ def seccion_admin():
 
     if not st.session_state.admin_ok:
         st.info("Esta sección requiere la clave de soporte.")
-        clave = st.text_input("Clave de soporte", type="password", key="clave_soporte")
-        if st.button("Desbloquear administración"):
+        # Funciona con el botón o presionando Enter
+        with st.form("form_soporte"):
+            clave = st.text_input("Clave de soporte", type="password", key="clave_soporte")
+            desbloquear = st.form_submit_button("Desbloquear administración")
+        if desbloquear:
             if clave == CLAVE_SOPORTE:
                 st.session_state.admin_ok = True
                 st.rerun()
@@ -444,16 +449,20 @@ with col_izq:
     with tab1:
         st.subheader(f"Reservar en: {sala_seleccionada}")
 
+        # Fecha y hora de inicio quedan fuera del formulario para que la lista
+        # de "Hora de Fin" se actualice al instante cuando cambias la hora de inicio.
         fecha_reserva = st.date_input("Fecha", min_value=hoy(), key="fecha_res")
-
         hora_inicio_str = st.selectbox("Hora de Inicio", HORAS[:-1])
         horas_fin_posibles = [h for h in HORAS if h > hora_inicio_str]
-        hora_fin_str = st.selectbox("Hora de Fin (Mínimo 30 min)", horas_fin_posibles)
 
-        nombre_usuario = st.text_input("Nombre y Apellido")
-        area_usuario = st.text_input("Área / Departamento")
+        # El formulario permite confirmar con el botón o presionando Enter
+        with st.form("form_reserva", clear_on_submit=False):
+            hora_fin_str = st.selectbox("Hora de Fin (Mínimo 30 min)", horas_fin_posibles)
+            nombre_usuario = st.text_input("Nombre y Apellido")
+            area_usuario = st.text_input("Área / Departamento")
+            confirmar = st.form_submit_button("Confirmar Reserva", type="primary")
 
-        if st.button("Confirmar Reserva", type="primary"):
+        if confirmar:
             if not nombre_usuario.strip() or not area_usuario.strip():
                 st.error("⚠️ Por favor completa tu Nombre y Área antes de reservar.")
             elif existe_traslape(sala_seleccionada, fecha_reserva, hora_inicio_str, hora_fin_str):
