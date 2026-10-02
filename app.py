@@ -2,6 +2,7 @@ import streamlit as st
 import datetime
 import sqlite3
 import html
+import io
 import pandas as pd
 from zoneinfo import ZoneInfo
 
@@ -17,6 +18,7 @@ SALAS = ["Sala Segundo Piso", "Sala Tercer Piso", "Sala Septimo Piso"]
 
 USUARIO_VALIDO = "admin"
 CLAVE_VALIDA = "grupool"
+CLAVE_SOPORTE = "soporte@2027"   # clave para administración (editar / borrar / Excel)
 
 ZONA = ZoneInfo("America/Lima")
 
@@ -88,11 +90,38 @@ def reservas_del_dia(fecha):
     return df
 
 
+def todas_las_reservas():
+    conn = sqlite3.connect(DB)
+    df = pd.read_sql_query(
+        "SELECT id, sala, fecha, inicio, fin, nombre, area FROM reservas "
+        "ORDER BY fecha, sala, inicio", conn)
+    conn.close()
+    return df
+
+
+def a_excel(df):
+    d = df.drop(columns=["id"]).rename(columns={
+        "sala": "Sala", "fecha": "Fecha", "inicio": "Inicio",
+        "fin": "Fin", "nombre": "Reservado por", "area": "Área"})
+    salida = io.BytesIO()
+    with pd.ExcelWriter(salida, engine="openpyxl") as w:
+        d.to_excel(w, index=False, sheet_name="Reservas")
+        ws = w.sheets["Reservas"]
+        for col in ws.columns:
+            ancho = max(len(str(c.value)) if c.value is not None else 0 for c in col) + 3
+            ws.column_dimensions[col[0].column_letter].width = ancho
+    return salida.getvalue()
+
+
 # ------------------------------------------------------------------
 # Estado inicial (siempre con la fecha de Lima, no la del servidor)
 # ------------------------------------------------------------------
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
+if "admin_ok" not in st.session_state:
+    st.session_state.admin_ok = False
+if "admin_ver" not in st.session_state:
+    st.session_state.admin_ver = 0
 
 if "fecha_res" not in st.session_state or st.session_state.fecha_res < hoy():
     st.session_state.fecha_res = hoy()
@@ -144,8 +173,6 @@ def panel_en_vivo():
     modo = st.radio("Ver día", ["Hoy", "Mañana", "Otra fecha"],
                     horizontal=True, key="panel_modo")
 
-    # La fecha se recalcula en cada actualización: a las 00:00 (Lima)
-    # "Hoy" pasa automáticamente al día nuevo y empieza desde cero.
     if modo == "Hoy":
         fecha_panel = hoy()
     elif modo == "Mañana":
@@ -161,7 +188,6 @@ def panel_en_vivo():
     df = reservas_del_dia(fecha_panel)
 
     filas = ""
-    # Cada fila = un bloque de 30 min (08:00 ... 19:30)
     for h in HORAS[:-1]:
         celdas = (f"<td style='padding:6px 8px;font-weight:bold;color:{AZUL};"
                   f"white-space:nowrap;border-bottom:1px solid #8884;'>{h}</td>")
@@ -189,27 +215,189 @@ def panel_en_vivo():
 
 
 # ------------------------------------------------------------------
-# Cabecera: logo + bienvenida
+# Administración (protegida con otra clave)
 # ------------------------------------------------------------------
-col_logo, col_titulo, col_salir = st.columns([1, 6, 1])
+def seccion_admin():
+    ver = st.session_state.admin_ver
+
+    if "flash" in st.session_state:
+        st.success(st.session_state.pop("flash"))
+
+    if not st.session_state.admin_ok:
+        st.info("Esta sección requiere la clave de soporte.")
+        clave = st.text_input("Clave de soporte", type="password", key="clave_soporte")
+        if st.button("Desbloquear administración"):
+            if clave == CLAVE_SOPORTE:
+                st.session_state.admin_ok = True
+                st.rerun()
+            else:
+                st.error("❌ Clave de soporte incorrecta.")
+        return
+
+    if st.button("🔒 Bloquear administración"):
+        st.session_state.admin_ok = False
+        st.rerun()
+
+    df = todas_las_reservas()
+
+    # ---------------- Descargar Excel ----------------
+    st.markdown(f"#### <span style='color:{AZUL};'>📥 Descargar reservas en Excel</span>",
+                unsafe_allow_html=True)
+    if df.empty:
+        st.info("No hay reservas para descargar.")
+    else:
+        st.download_button(
+            "Descargar Excel",
+            data=a_excel(df),
+            file_name=f"reservas_{hoy().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    st.divider()
+
+    # ---------------- Editar reservas ----------------
+    st.markdown(f"#### <span style='color:{AZUL};'>✏️ Editar fechas y reservas</span>",
+                unsafe_allow_html=True)
+    st.caption("Puedes cambiar sala, fecha, horas, nombre o área. "
+               "Para eliminar una fila, selecciónala y presiona la tecla Supr / el ícono de basura. "
+               "Luego pulsa «Guardar cambios».")
+
+    if df.empty:
+        st.info("No hay reservas registradas.")
+    else:
+        df_edit = df.copy()
+        df_edit["fecha"] = pd.to_datetime(df_edit["fecha"]).dt.date
+
+        editado = st.data_editor(
+            df_edit,
+            key=f"editor_{ver}",
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "id": st.column_config.NumberColumn("ID", disabled=True),
+                "sala": st.column_config.SelectboxColumn("Sala", options=SALAS, required=True),
+                "fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD", required=True),
+                "inicio": st.column_config.SelectboxColumn("Inicio", options=HORAS[:-1], required=True),
+                "fin": st.column_config.SelectboxColumn("Fin", options=HORAS[1:], required=True),
+                "nombre": st.column_config.TextColumn("Reservado por", required=True),
+                "area": st.column_config.TextColumn("Área", required=True),
+            })
+
+        if st.button("💾 Guardar cambios", type="primary"):
+            filas, errores = [], []
+            for _, r in editado.iterrows():
+                vacio = any(pd.isna(r[c]) or str(r[c]).strip() == ""
+                            for c in ["sala", "fecha", "inicio", "fin", "nombre", "area"])
+                if vacio:
+                    errores.append("Hay filas incompletas: llena todos los campos.")
+                    break
+                fecha_txt = str(pd.to_datetime(r["fecha"]).date())
+                if r["inicio"] >= r["fin"]:
+                    errores.append(f"La hora de fin debe ser mayor al inicio ({r['nombre']}, {fecha_txt}).")
+                    break
+                filas.append({
+                    "id": None if pd.isna(r["id"]) else int(r["id"]),
+                    "sala": r["sala"], "fecha": fecha_txt,
+                    "inicio": r["inicio"], "fin": r["fin"],
+                    "nombre": str(r["nombre"]).strip().upper(),
+                    "area": str(r["area"]).strip().upper()})
+
+            # Revisar cruces de horario entre las filas resultantes
+            if not errores:
+                for i in range(len(filas)):
+                    for j in range(i + 1, len(filas)):
+                        a, b = filas[i], filas[j]
+                        if (a["sala"] == b["sala"] and a["fecha"] == b["fecha"]
+                                and not (a["fin"] <= b["inicio"] or a["inicio"] >= b["fin"])):
+                            errores.append(
+                                f"Cruce de horario en {a['sala']} el {a['fecha']}: "
+                                f"{a['inicio']}-{a['fin']} con {b['inicio']}-{b['fin']}.")
+                            break
+                    if errores:
+                        break
+
+            if errores:
+                st.error("⚠️ " + errores[0])
+            else:
+                ids_originales = set(int(i) for i in df["id"])
+                ids_editados = set(f["id"] for f in filas if f["id"] is not None)
+                borrados = ids_originales - ids_editados
+
+                conn = sqlite3.connect(DB)
+                c = conn.cursor()
+                for i in borrados:
+                    c.execute("DELETE FROM reservas WHERE id = ?", (i,))
+                for f in filas:
+                    if f["id"] is None:
+                        c.execute(
+                            "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area) VALUES (?,?,?,?,?,?)",
+                            (f["sala"], f["fecha"], f["inicio"], f["fin"], f["nombre"], f["area"]))
+                    else:
+                        c.execute(
+                            "UPDATE reservas SET sala=?, fecha=?, inicio=?, fin=?, nombre=?, area=? WHERE id=?",
+                            (f["sala"], f["fecha"], f["inicio"], f["fin"], f["nombre"], f["area"], f["id"]))
+                conn.commit()
+                conn.close()
+
+                st.session_state.admin_ver += 1
+                st.session_state.flash = "✅ Cambios guardados correctamente."
+                st.rerun()
+
+    st.divider()
+
+    # ---------------- Limpiar ----------------
+    st.markdown(f"#### <span style='color:{AZUL};'>🧹 Limpiar reservas</span>",
+                unsafe_allow_html=True)
+
+    cl1, cl2 = st.columns(2)
+    with cl1:
+        dia_borrar = st.date_input("Borrar todas las reservas de este día", value=hoy(),
+                                   key=f"dia_borrar_{ver}")
+        ok_dia = st.checkbox("Confirmo borrar ese día", key=f"ok_dia_{ver}")
+        if st.button("🗑️ Borrar día", disabled=not ok_dia):
+            conn = sqlite3.connect(DB)
+            conn.execute("DELETE FROM reservas WHERE fecha = ?", (str(dia_borrar),))
+            conn.commit()
+            conn.close()
+            st.session_state.admin_ver += 1
+            st.session_state.flash = f"✅ Reservas del {dia_borrar.strftime('%d/%m/%Y')} eliminadas."
+            st.rerun()
+    with cl2:
+        st.write("Borrar **TODAS** las reservas de todas las salas y fechas")
+        ok_todo = st.checkbox("Confirmo borrar TODO (no se puede deshacer)", key=f"ok_todo_{ver}")
+        if st.button("🗑️ Borrar todo", disabled=not ok_todo):
+            conn = sqlite3.connect(DB)
+            conn.execute("DELETE FROM reservas")
+            conn.commit()
+            conn.close()
+            st.session_state.admin_ver += 1
+            st.session_state.flash = "✅ Todas las reservas fueron eliminadas."
+            st.rerun()
+
+
+# ------------------------------------------------------------------
+# Cabecera compacta: logo + bienvenida
+# ------------------------------------------------------------------
+col_logo, col_titulo, col_salir = st.columns([1, 9, 1])
 with col_logo:
     try:
-        st.image("logo.png", width=110)
+        st.image("logo.png", width=70)
     except Exception:
         pass
 with col_titulo:
     st.markdown(
         f"""
-        <h1 style='margin-top:10px;'>
+        <div style='font-size:1.3rem;font-weight:700;margin-top:14px;line-height:1.3;'>
             <span style='color:{AZUL};'>Bienvenido a tu reserva de sala de reuniones</span>
             <span style='color:{NARANJA};'>Grupo OL</span>
-        </h1>
+        </div>
         """,
         unsafe_allow_html=True)
 with col_salir:
     st.write("")
     if st.button("Cerrar sesión"):
         st.session_state.autenticado = False
+        st.session_state.admin_ok = False
         st.rerun()
 
 st.divider()
@@ -286,3 +474,10 @@ with col_izq:
 
 with col_der:
     panel_en_vivo()
+
+# ------------------------------------------------------------------
+# Administración (ancho completo, debajo de todo)
+# ------------------------------------------------------------------
+st.divider()
+with st.expander("🔧 Administración (solo soporte)", expanded=st.session_state.admin_ok):
+    seccion_admin()
