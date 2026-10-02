@@ -11,6 +11,11 @@ from zoneinfo import ZoneInfo
 # ------------------------------------------------------------------
 st.set_page_config(page_title="Reserva de Salas - Grupo OL", page_icon="📅", layout="wide")
 
+# Reduce el espacio vacío de la parte superior de la página
+st.markdown(
+    "<style>.block-container{padding-top:3rem !important;}</style>",
+    unsafe_allow_html=True)
+
 AZUL = "#1F4E9C"
 NARANJA = "#FF5A00"
 DB = "reservas.db"
@@ -187,29 +192,52 @@ def panel_en_vivo():
 
     df = reservas_del_dia(fecha_panel)
 
+    n_filas = len(HORAS) - 1          # 24 bloques de 30 min
+    saltar = {sala: 0 for sala in SALAS}
     filas = ""
-    for h in HORAS[:-1]:
+
+    for idx in range(n_filas):
+        h = HORAS[idx]
+        h_fin = HORAS[idx + 1]
+        # Cada fila muestra su rango completo: 08:00 - 08:30, etc.
         celdas = (f"<td style='padding:6px 8px;font-weight:bold;color:{AZUL};"
-                  f"white-space:nowrap;border-bottom:1px solid #8884;'>{h}</td>")
+                  f"white-space:nowrap;border-bottom:1px solid #8884;'>{h} - {h_fin}</td>")
+
         for sala in SALAS:
+            if saltar[sala] > 0:          # celda ya cubierta por un bloque combinado
+                saltar[sala] -= 1
+                continue
+
             ocupado = df[(df["sala"] == sala) & (df["inicio"] <= h) & (df["fin"] > h)]
             if ocupado.empty:
                 celdas += ("<td style='padding:6px 8px;background:#2e9e4f22;color:#2e9e4f;"
                            "text-align:center;border-bottom:1px solid #8884;'>Libre</td>")
             else:
                 r = ocupado.iloc[0]
-                texto = html.escape(f"{r['nombre']} · {r['area']}")
-                celdas += (f"<td style='padding:6px 8px;background:{NARANJA};color:white;"
-                           f"font-size:12px;text-align:center;border-bottom:1px solid #8884;'>{texto}</td>")
+                # Cuántos bloques de 30 min dura la reserva desde esta fila
+                if r["fin"] in HORAS:
+                    n = HORAS.index(r["fin"]) - idx
+                else:
+                    n = 1
+                n = max(1, min(n, n_filas - idx))
+                saltar[sala] = n - 1
+
+                nombre = html.escape(f"{r['nombre']} · {r['area']}")
+                rango = html.escape(f"{r['inicio']} - {r['fin']}")
+                celdas += (
+                    f"<td rowspan='{n}' style='padding:6px 8px;background:{NARANJA};color:white;"
+                    f"font-size:12px;text-align:center;vertical-align:middle;"
+                    f"border:1px solid #ffffff55;'>"
+                    f"<b>{nombre}</b><br>{rango}</td>")
         filas += f"<tr>{celdas}</tr>"
 
-    encabezado = f"<th style='padding:8px;background:{AZUL};color:white;'>Hora</th>"
+    encabezado = f"<th style='padding:8px;background:{AZUL};color:white;'>Horario</th>"
     for sala in SALAS:
         encabezado += f"<th style='padding:8px;background:{AZUL};color:white;font-size:13px;'>{sala}</th>"
 
     tabla = (f"<div style='max-height:620px;overflow-y:auto;'>"
              f"<table style='width:100%;border-collapse:collapse;'>"
-             f"<thead style='position:sticky;top:0;'><tr>{encabezado}</tr></thead>"
+             f"<thead style='position:sticky;top:0;z-index:1;'><tr>{encabezado}</tr></thead>"
              f"<tbody>{filas}</tbody></table></div>")
     st.markdown(tabla, unsafe_allow_html=True)
 
@@ -376,25 +404,24 @@ def seccion_admin():
 
 
 # ------------------------------------------------------------------
-# Cabecera compacta: logo + bienvenida
+# Cabecera: logo + título centrado + cerrar sesión
 # ------------------------------------------------------------------
-col_logo, col_titulo, col_salir = st.columns([1, 9, 1])
+col_logo, col_titulo, col_salir = st.columns([1, 8, 1], vertical_alignment="center")
 with col_logo:
     try:
-        st.image("logo.png", width=70)
+        st.image("logo.png", width=80)
     except Exception:
         pass
 with col_titulo:
     st.markdown(
         f"""
-        <div style='font-size:1.3rem;font-weight:700;margin-top:14px;line-height:1.3;'>
+        <div style='text-align:center;font-size:1.8rem;font-weight:800;line-height:1.25;margin:0;'>
             <span style='color:{AZUL};'>Bienvenido a tu reserva de sala de reuniones</span>
             <span style='color:{NARANJA};'>Grupo OL</span>
         </div>
         """,
         unsafe_allow_html=True)
 with col_salir:
-    st.write("")
     if st.button("Cerrar sesión"):
         st.session_state.autenticado = False
         st.session_state.admin_ok = False
@@ -452,7 +479,9 @@ with col_izq:
                     st.session_state.panel_otra = fecha_reserva
                 st.session_state.fecha_cons = fecha_reserva
 
-                st.success(f"✅ ¡Reserva realizada con éxito en la {sala_seleccionada} para {nombre_usuario.upper()}!")
+                st.success(
+                    f"✅ ¡Reserva realizada con éxito en la {sala_seleccionada} para "
+                    f"{nombre_usuario.upper()} de {hora_inicio_str} a {hora_fin_str}!")
 
     with tab2:
         st.subheader(f"Reservas programadas en: {sala_seleccionada}")
