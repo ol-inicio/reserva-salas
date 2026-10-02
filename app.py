@@ -19,7 +19,7 @@ st.markdown(
 AZUL = "#1F4E9C"
 NARANJA = "#FF5A00"
 DB = "reservas.db"
-SALAS = ["Sala Segundo Piso", "Sala Tercer Piso", "Sala Septimo Piso", "Sala Piso 5"]
+SALAS = ["Sala Segundo Piso", "Sala Tercer Piso", "Sala Piso 5", "Sala Septimo Piso"]
 
 USUARIO_VALIDO = "admin"
 CLAVE_VALIDA = "grupool"
