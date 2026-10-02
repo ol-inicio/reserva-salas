@@ -19,10 +19,9 @@ st.markdown(
 AZUL = "#1F4E9C"
 NARANJA = "#FF5A00"
 DB = "reservas.db"
-SALAS = ["Sala Segundo Piso", "Sala Tercer Piso", "Sala Piso 5", "Sala Septimo Piso"]
+SALAS = ["Sala Tercer Piso", "Sala Piso 5", "Sala Septimo Piso"]
+DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
 
-USUARIO_VALIDO = "admin"
-CLAVE_VALIDA = "grupool"
 CLAVE_SOPORTE = "soporte@2027"   # clave para administración (editar / borrar / Excel)
 
 ZONA = ZoneInfo("America/Lima")
@@ -34,6 +33,25 @@ def ahora():
 
 def hoy():
     return ahora().date()
+
+
+def lunes_de(fecha):
+    """Lunes de la semana a la que pertenece 'fecha'."""
+    return fecha - datetime.timedelta(days=fecha.weekday())
+
+
+def lunes_actual():
+    """Lunes de la semana en curso. Si hoy es sábado o domingo, la semana siguiente."""
+    lunes = lunes_de(hoy())
+    if hoy().weekday() >= 5:
+        lunes += datetime.timedelta(days=7)
+    return lunes
+
+
+def proximo_dia_habil(fecha):
+    while fecha.weekday() >= 5:
+        fecha += datetime.timedelta(days=1)
+    return fecha
 
 
 # Bloques de 30 min: 08:00 -> 20:00
@@ -86,11 +104,14 @@ def existe_traslape(sala, fecha, inicio, fin):
     return len(solapados) > 0
 
 
-def reservas_del_dia(fecha):
+def reservas_semana(sala, lunes):
+    """Reservas de una sala de lunes a viernes de la semana indicada."""
+    viernes = lunes + datetime.timedelta(days=4)
     conn = sqlite3.connect(DB)
     df = pd.read_sql_query(
-        "SELECT sala, inicio, fin, nombre, area FROM reservas WHERE fecha = ?",
-        conn, params=(str(fecha),))
+        "SELECT fecha, inicio, fin, nombre, area FROM reservas "
+        "WHERE sala = ? AND fecha BETWEEN ? AND ?",
+        conn, params=(sala, str(lunes), str(viernes)))
     conn.close()
     return df
 
@@ -121,81 +142,53 @@ def a_excel(df):
 # ------------------------------------------------------------------
 # Estado inicial (siempre con la fecha de Lima, no la del servidor)
 # ------------------------------------------------------------------
-if "autenticado" not in st.session_state:
-    st.session_state.autenticado = False
 if "admin_ok" not in st.session_state:
     st.session_state.admin_ok = False
 if "admin_ver" not in st.session_state:
     st.session_state.admin_ver = 0
 
+if "sala_sel" not in st.session_state:
+    st.session_state.sala_sel = SALAS[0]
 if "fecha_res" not in st.session_state or st.session_state.fecha_res < hoy():
-    st.session_state.fecha_res = hoy()
+    st.session_state.fecha_res = proximo_dia_habil(hoy())
 if "fecha_cons" not in st.session_state:
     st.session_state.fecha_cons = hoy()
 if "panel_otra" not in st.session_state:
     st.session_state.panel_otra = hoy()
 if "panel_modo" not in st.session_state:
-    st.session_state.panel_modo = "Hoy"
+    st.session_state.panel_modo = "Esta semana"
 
 
 # ------------------------------------------------------------------
-# Login (funciona con el botón o presionando Enter)
-# ------------------------------------------------------------------
-def pantalla_login():
-    _, centro, _ = st.columns([1, 1, 1])
-    with centro:
-        try:
-            st.image("logo.png", width=180)
-        except Exception:
-            pass
-        st.markdown(
-            f"<h2 style='text-align:center;color:{AZUL};'>Ingreso al sistema</h2>",
-            unsafe_allow_html=True)
-        with st.form("form_login"):
-            usuario = st.text_input("Usuario")
-            clave = st.text_input("Clave", type="password")
-            enviar = st.form_submit_button("Ingresar", type="primary", use_container_width=True)
-        if enviar:
-            if usuario == USUARIO_VALIDO and clave == CLAVE_VALIDA:
-                st.session_state.autenticado = True
-                st.rerun()
-            else:
-                st.error("❌ Usuario o clave incorrectos.")
-
-
-if not st.session_state.autenticado:
-    pantalla_login()
-    st.stop()
-
-
-# ------------------------------------------------------------------
-# Panel en vivo (se actualiza solo cada 10 segundos y al reservar)
+# Panel en vivo: semana de lunes a viernes de la sala elegida
+# (se actualiza solo cada 10 segundos y al reservar)
 # ------------------------------------------------------------------
 @st.fragment(run_every="10s")
-def panel_en_vivo():
-    st.markdown(
-        f"<h3 style='color:{NARANJA};margin-bottom:0;'>🔴 Reservas en vivo</h3>",
-        unsafe_allow_html=True)
-
-    modo = st.radio("Ver día", ["Hoy", "Mañana", "Otra fecha"],
+def panel_en_vivo(sala):
+    modo = st.radio("Semana", ["Esta semana", "Próxima semana", "Otra semana"],
                     horizontal=True, key="panel_modo")
 
-    if modo == "Hoy":
-        fecha_panel = hoy()
-    elif modo == "Mañana":
-        fecha_panel = hoy() + datetime.timedelta(days=1)
+    if modo == "Esta semana":
+        lunes = lunes_actual()
+    elif modo == "Próxima semana":
+        lunes = lunes_actual() + datetime.timedelta(days=7)
     else:
-        fecha_panel = st.date_input("Fecha", key="panel_otra")
+        dia_elegido = st.date_input("Elige cualquier día de la semana que quieres ver", key="panel_otra")
+        lunes = lunes_de(dia_elegido)
+
+    dias = [lunes + datetime.timedelta(days=i) for i in range(5)]
 
     st.markdown(
-        f"<b style='color:{AZUL};'>{fecha_panel.strftime('%d/%m/%Y')}</b> "
+        f"<b style='color:{AZUL};'>{html.escape(sala)}</b> · Semana del "
+        f"<b>{dias[0].strftime('%d/%m/%Y')}</b> al <b>{dias[4].strftime('%d/%m/%Y')}</b> "
         f"<span style='opacity:.6;font-size:12px;'>· actualizado {ahora().strftime('%H:%M:%S')} (cada 10 s)</span>",
         unsafe_allow_html=True)
 
-    df = reservas_del_dia(fecha_panel)
+    df = reservas_semana(sala, lunes)
+    por_dia = [df[df["fecha"] == str(d)] for d in dias]
 
     n_filas = len(HORAS) - 1          # 24 bloques de 30 min
-    saltar = {sala: 0 for sala in SALAS}
+    saltar = [0] * 5
     filas = ""
 
     for idx in range(n_filas):
@@ -205,12 +198,13 @@ def panel_en_vivo():
         celdas = (f"<td style='padding:6px 8px;font-weight:bold;color:{AZUL};"
                   f"white-space:nowrap;border-bottom:1px solid #8884;'>{h} - {h_fin}</td>")
 
-        for sala in SALAS:
-            if saltar[sala] > 0:          # celda ya cubierta por un bloque combinado
-                saltar[sala] -= 1
+        for j in range(5):
+            if saltar[j] > 0:             # celda ya cubierta por un bloque combinado
+                saltar[j] -= 1
                 continue
 
-            ocupado = df[(df["sala"] == sala) & (df["inicio"] <= h) & (df["fin"] > h)]
+            dfd = por_dia[j]
+            ocupado = dfd[(dfd["inicio"] <= h) & (dfd["fin"] > h)]
             if ocupado.empty:
                 celdas += ("<td style='padding:6px 8px;background:#2e9e4f22;color:#2e9e4f;"
                            "text-align:center;border-bottom:1px solid #8884;'>Libre</td>")
@@ -222,7 +216,7 @@ def panel_en_vivo():
                 else:
                     n = 1
                 n = max(1, min(n, n_filas - idx))
-                saltar[sala] = n - 1
+                saltar[j] = n - 1
 
                 nombre = html.escape(f"{r['nombre']} · {r['area']}")
                 rango = html.escape(f"{r['inicio']} - {r['fin']}")
@@ -234,8 +228,14 @@ def panel_en_vivo():
         filas += f"<tr>{celdas}</tr>"
 
     encabezado = f"<th style='padding:8px;background:{AZUL};color:white;'>Horario</th>"
-    for sala in SALAS:
-        encabezado += f"<th style='padding:8px;background:{AZUL};color:white;font-size:13px;'>{sala}</th>"
+    for i, d in enumerate(dias):
+        es_hoy = (d == hoy())
+        borde = f"border-bottom:4px solid {NARANJA};" if es_hoy else ""
+        etiqueta_hoy = " · hoy" if es_hoy else ""
+        encabezado += (
+            f"<th style='padding:8px;background:{AZUL};color:white;font-size:13px;{borde}'>"
+            f"{DIAS[i]}<br><span style='font-weight:normal;font-size:11px;'>"
+            f"{d.strftime('%d/%m')}{etiqueta_hoy}</span></th>")
 
     tabla = (f"<div style='max-height:620px;overflow-y:auto;'>"
              f"<table style='width:100%;border-collapse:collapse;'>"
@@ -245,7 +245,7 @@ def panel_en_vivo():
 
 
 # ------------------------------------------------------------------
-# Administración (protegida con otra clave)
+# Administración (protegida con clave de soporte)
 # ------------------------------------------------------------------
 def seccion_admin():
     ver = st.session_state.admin_ver
@@ -300,6 +300,9 @@ def seccion_admin():
         df_edit = df.copy()
         df_edit["fecha"] = pd.to_datetime(df_edit["fecha"]).dt.date
 
+        # Incluye salas antiguas (ya retiradas) para que sus reservas se puedan ver/borrar
+        opciones_sala = SALAS + [s for s in df["sala"].dropna().unique() if s not in SALAS]
+
         editado = st.data_editor(
             df_edit,
             key=f"editor_{ver}",
@@ -308,7 +311,7 @@ def seccion_admin():
             hide_index=True,
             column_config={
                 "id": st.column_config.NumberColumn("ID", disabled=True),
-                "sala": st.column_config.SelectboxColumn("Sala", options=SALAS, required=True),
+                "sala": st.column_config.SelectboxColumn("Sala", options=opciones_sala, required=True),
                 "fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD", required=True),
                 "inicio": st.column_config.SelectboxColumn("Inicio", options=HORAS[:-1], required=True),
                 "fin": st.column_config.SelectboxColumn("Fin", options=HORAS[1:], required=True),
@@ -409,9 +412,9 @@ def seccion_admin():
 
 
 # ------------------------------------------------------------------
-# Cabecera: logo + título centrado + cerrar sesión
+# Cabecera: logo + título centrado
 # ------------------------------------------------------------------
-col_logo, col_titulo, col_salir = st.columns([1, 8, 1], vertical_alignment="center")
+col_logo, col_titulo, _ = st.columns([1, 8, 1], vertical_alignment="center")
 with col_logo:
     try:
         st.image("logo.png", width=80)
@@ -426,20 +429,14 @@ with col_titulo:
         </div>
         """,
         unsafe_allow_html=True)
-with col_salir:
-    if st.button("Cerrar sesión"):
-        st.session_state.autenticado = False
-        st.session_state.admin_ok = False
-        st.rerun()
 
 st.divider()
 
-# Selector de sala
-st.sidebar.header("Opciones de Sala")
-sala_seleccionada = st.sidebar.selectbox("Selecciona la Sala", SALAS)
+# Sala elegida (se cambia con los botones de la derecha, sobre la tabla)
+sala_seleccionada = st.session_state.sala_sel
 
 # ------------------------------------------------------------------
-# Layout: izquierda = formulario / agenda, derecha = panel en vivo
+# Layout: izquierda = formulario / agenda, derecha = salas + tabla semanal
 # ------------------------------------------------------------------
 col_izq, col_der = st.columns([3, 4], gap="large")
 
@@ -465,6 +462,8 @@ with col_izq:
         if confirmar:
             if not nombre_usuario.strip() or not area_usuario.strip():
                 st.error("⚠️ Por favor completa tu Nombre y Área antes de reservar.")
+            elif fecha_reserva.weekday() >= 5:
+                st.error("⚠️ Las reservas son solo de lunes a viernes. Elige un día laborable.")
             elif existe_traslape(sala_seleccionada, fecha_reserva, hora_inicio_str, hora_fin_str):
                 st.error(f"❌ **FECHA O HORA RESERVADA**. La {sala_seleccionada} ya tiene un evento asignado en ese horario.")
             else:
@@ -478,13 +477,14 @@ with col_izq:
                 conn.commit()
                 conn.close()
 
-                # Hacer que el panel en vivo muestre al instante el día reservado
-                if fecha_reserva == hoy():
-                    st.session_state.panel_modo = "Hoy"
-                elif fecha_reserva == hoy() + datetime.timedelta(days=1):
-                    st.session_state.panel_modo = "Mañana"
+                # Hacer que la tabla muestre al instante la semana reservada
+                lunes_reserva = lunes_de(fecha_reserva)
+                if lunes_reserva == lunes_actual():
+                    st.session_state.panel_modo = "Esta semana"
+                elif lunes_reserva == lunes_actual() + datetime.timedelta(days=7):
+                    st.session_state.panel_modo = "Próxima semana"
                 else:
-                    st.session_state.panel_modo = "Otra fecha"
+                    st.session_state.panel_modo = "Otra semana"
                     st.session_state.panel_otra = fecha_reserva
                 st.session_state.fecha_cons = fecha_reserva
 
@@ -511,7 +511,11 @@ with col_izq:
             st.dataframe(df, use_container_width=True)
 
 with col_der:
-    panel_en_vivo()
+    st.markdown(
+        f"<h3 style='color:{NARANJA};margin-bottom:0;'>🔴 Reservas en vivo</h3>",
+        unsafe_allow_html=True)
+    st.radio("Selecciona la sala", SALAS, horizontal=True, key="sala_sel")
+    panel_en_vivo(st.session_state.sala_sel)
 
 # ------------------------------------------------------------------
 # Administración (ancho completo, debajo de todo)
