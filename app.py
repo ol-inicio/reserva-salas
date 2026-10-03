@@ -35,17 +35,21 @@ def hoy():
     return ahora().date()
 
 
+def a_min(t):
+    """'09:30' -> 570 minutos"""
+    h, m = str(t).split(":")
+    return int(h) * 60 + int(m)
+
+
 def lunes_de(fecha):
     """Lunes de la semana a la que pertenece 'fecha'."""
     return fecha - datetime.timedelta(days=fecha.weekday())
 
 
 def lunes_actual():
-    """Lunes de la semana en curso. Si hoy es sábado o domingo, la semana siguiente."""
-    lunes = lunes_de(hoy())
-    if hoy().weekday() >= 5:
-        lunes += datetime.timedelta(days=7)
-    return lunes
+    """Lunes de la semana en curso. Cambia solo cada lunes a las 00:00 (hora de Lima):
+    la tabla pasa a la semana nueva, limpia y lista para reservar."""
+    return lunes_de(hoy())
 
 
 def proximo_dia_habil(fecha):
@@ -140,6 +144,73 @@ def a_excel(df):
 
 
 # ------------------------------------------------------------------
+# Reservar (lo usan el formulario principal y la pestaña de disponibilidad)
+# ------------------------------------------------------------------
+def registrar_reserva(sala, fecha, inicio, fin, nombre, area):
+    """Valida y guarda la reserva. Devuelve (ok, mensaje)."""
+    if not nombre.strip() or not area.strip():
+        return False, "⚠️ Por favor completa tu Nombre y Área antes de reservar."
+    if fecha.weekday() >= 5:
+        return False, "⚠️ Las reservas son solo de lunes a viernes. Elige un día laborable."
+    if existe_traslape(sala, fecha, inicio, fin):
+        return False, (f"❌ **FECHA O HORA RESERVADA**. La {sala} ya tiene un evento "
+                       f"asignado en ese horario.")
+
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area)
+        VALUES (?, ?, ?, ?, ?, ?)
+    ''', (sala, str(fecha), inicio, fin, nombre.strip().upper(), area.strip().upper()))
+    conn.commit()
+    conn.close()
+
+    # Hacer que la tabla en vivo muestre al instante la semana reservada
+    lunes_reserva = lunes_de(fecha)
+    if lunes_reserva == lunes_actual():
+        st.session_state.panel_modo = "Esta semana"
+    elif lunes_reserva == lunes_actual() + datetime.timedelta(days=7):
+        st.session_state.panel_modo = "Próxima semana"
+    else:
+        st.session_state.panel_modo = "Otra semana"
+        st.session_state.panel_otra = fecha
+    st.session_state.fecha_cons = fecha
+
+    return True, (f"✅ ¡Reserva realizada con éxito en la {sala} para "
+                  f"{nombre.upper()} de {inicio} a {fin}!")
+
+
+# ------------------------------------------------------------------
+# Disponibilidad
+# ------------------------------------------------------------------
+def bloques_libres(df_dia, fecha):
+    """Bloques de 30 min libres de un día (si es hoy, solo los que aún no pasaron)."""
+    ocupados = set()
+    for _, r in df_dia.iterrows():
+        for h in HORAS[:-1]:
+            if r["inicio"] <= h < r["fin"]:
+                ocupados.add(h)
+    libres = [h for h in HORAS[:-1] if h not in ocupados]
+    if fecha == hoy():
+        ahora_min = ahora().hour * 60 + ahora().minute
+        bloque_actual = ahora_min - (ahora_min % 30)
+        libres = [h for h in libres if a_min(h) >= bloque_actual]
+    return libres
+
+
+def rangos_libres(libres):
+    """Une bloques consecutivos: ['08:00','08:30','09:00'] -> [('08:00','09:30')]"""
+    rangos = []
+    for h in libres:
+        fin = HORAS[HORAS.index(h) + 1]
+        if rangos and rangos[-1][1] == h:
+            rangos[-1] = (rangos[-1][0], fin)
+        else:
+            rangos.append((h, fin))
+    return rangos
+
+
+# ------------------------------------------------------------------
 # Estado inicial (siempre con la fecha de Lima, no la del servidor)
 # ------------------------------------------------------------------
 if "admin_ok" not in st.session_state:
@@ -147,8 +218,12 @@ if "admin_ok" not in st.session_state:
 if "admin_ver" not in st.session_state:
     st.session_state.admin_ver = 0
 
+# La sala elegida en el formulario (sala_form) y en los botones de la derecha
+# (sala_sel) siempre quedan sincronizadas.
 if "sala_sel" not in st.session_state:
     st.session_state.sala_sel = SALAS[0]
+if "sala_form" not in st.session_state:
+    st.session_state.sala_form = st.session_state.sala_sel
 if "fecha_res" not in st.session_state or st.session_state.fecha_res < hoy():
     st.session_state.fecha_res = proximo_dia_habil(hoy())
 if "fecha_cons" not in st.session_state:
@@ -157,6 +232,14 @@ if "panel_otra" not in st.session_state:
     st.session_state.panel_otra = hoy()
 if "panel_modo" not in st.session_state:
     st.session_state.panel_modo = "Esta semana"
+
+
+def _sala_desde_form():
+    st.session_state.sala_sel = st.session_state.sala_form
+
+
+def _sala_desde_botones():
+    st.session_state.sala_form = st.session_state.sala_sel
 
 
 # ------------------------------------------------------------------
@@ -432,17 +515,20 @@ with col_titulo:
 
 st.divider()
 
-# Sala elegida (se cambia con los botones de la derecha, sobre la tabla)
+# Sala elegida (se puede cambiar arriba del formulario o con los botones de la derecha)
 sala_seleccionada = st.session_state.sala_sel
 
 # ------------------------------------------------------------------
-# Layout: izquierda = formulario / agenda, derecha = salas + tabla semanal
+# Layout: izquierda = formulario angosto, derecha = salas + tabla semanal grande
 # ------------------------------------------------------------------
-col_izq, col_der = st.columns([3, 4], gap="large")
+col_izq, col_der = st.columns([5, 11], gap="large")
 
 with col_izq:
-    tab1, tab2 = st.tabs(["➕ Realizar Reserva", "📋 Ver Disponibilidad / Agenda"])
+    st.selectbox("Sala", SALAS, key="sala_form", on_change=_sala_desde_form)
 
+    tab1, tab2 = st.tabs(["➕ Realizar Reserva", "🔍 Ver si hay disponibilidad"])
+
+    # ---------------------- RESERVAR ----------------------
     with tab1:
         st.subheader(f"Reservar en: {sala_seleccionada}")
 
@@ -460,61 +546,102 @@ with col_izq:
             confirmar = st.form_submit_button("Confirmar Reserva", type="primary")
 
         if confirmar:
-            if not nombre_usuario.strip() or not area_usuario.strip():
-                st.error("⚠️ Por favor completa tu Nombre y Área antes de reservar.")
-            elif fecha_reserva.weekday() >= 5:
-                st.error("⚠️ Las reservas son solo de lunes a viernes. Elige un día laborable.")
-            elif existe_traslape(sala_seleccionada, fecha_reserva, hora_inicio_str, hora_fin_str):
-                st.error(f"❌ **FECHA O HORA RESERVADA**. La {sala_seleccionada} ya tiene un evento asignado en ese horario.")
-            else:
-                conn = sqlite3.connect(DB)
-                c = conn.cursor()
-                c.execute('''
-                    INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                ''', (sala_seleccionada, str(fecha_reserva), hora_inicio_str, hora_fin_str,
-                      nombre_usuario.strip().upper(), area_usuario.strip().upper()))
-                conn.commit()
-                conn.close()
+            ok, msg = registrar_reserva(sala_seleccionada, fecha_reserva, hora_inicio_str,
+                                        hora_fin_str, nombre_usuario, area_usuario)
+            (st.success if ok else st.error)(msg)
 
-                # Hacer que la tabla muestre al instante la semana reservada
-                lunes_reserva = lunes_de(fecha_reserva)
-                if lunes_reserva == lunes_actual():
-                    st.session_state.panel_modo = "Esta semana"
-                elif lunes_reserva == lunes_actual() + datetime.timedelta(days=7):
-                    st.session_state.panel_modo = "Próxima semana"
-                else:
-                    st.session_state.panel_modo = "Otra semana"
-                    st.session_state.panel_otra = fecha_reserva
-                st.session_state.fecha_cons = fecha_reserva
-
-                st.success(
-                    f"✅ ¡Reserva realizada con éxito en la {sala_seleccionada} para "
-                    f"{nombre_usuario.upper()} de {hora_inicio_str} a {hora_fin_str}!")
-
+    # ---------------------- DISPONIBILIDAD ----------------------
     with tab2:
-        st.subheader(f"Reservas programadas en: {sala_seleccionada}")
-        fecha_consulta = st.date_input("Filtrar por Fecha", key="fecha_cons")
+        st.subheader(f"Disponibilidad en: {sala_seleccionada}")
 
-        conn = sqlite3.connect(DB)
-        df = pd.read_sql_query('''
-            SELECT inicio AS [Inicio], fin AS [Fin], nombre AS [Reservado por], area AS [Área]
-            FROM reservas
-            WHERE sala = ? AND fecha = ?
-            ORDER BY inicio ASC
-        ''', conn, params=(sala_seleccionada, str(fecha_consulta)))
-        conn.close()
+        if "msg_disp" in st.session_state:
+            ok_d, msg_d = st.session_state.pop("msg_disp")
+            (st.success if ok_d else st.error)(msg_d)
 
-        if df.empty:
-            st.info(f"No hay reservas registradas para el {fecha_consulta.strftime('%d/%m/%Y')} en la {sala_seleccionada}.")
+        modo_disp = st.radio("Semana a revisar", ["Esta semana", "Próxima semana"],
+                             horizontal=True, key="disp_modo")
+        lunes_d = lunes_actual()
+        if modo_disp == "Próxima semana":
+            lunes_d += datetime.timedelta(days=7)
+        dias_d = [lunes_d + datetime.timedelta(days=i) for i in range(5)]
+        df_sem = reservas_semana(sala_seleccionada, lunes_d)
+
+        disponibles, lineas = {}, []
+        for d in dias_d:
+            if d < hoy():
+                continue                      # los días que ya pasaron no se ofrecen
+            etiqueta = f"{DIAS[d.weekday()]} {d.strftime('%d/%m')}"
+            libres = bloques_libres(df_sem[df_sem["fecha"] == str(d)], d)
+            if libres:
+                disponibles[d] = libres
+                tramos = " · ".join(f"{a} a {b}" for a, b in rangos_libres(libres))
+                lineas.append(f"🟢 **{etiqueta}** — libre: {tramos}")
+            else:
+                lineas.append(f"🔴 **{etiqueta}** — completo")
+
+        if not lineas:
+            st.info("Los días de esta semana ya pasaron. Revisa la próxima semana.")
+        elif not disponibles:
+            cuando = "esta semana" if modo_disp == "Esta semana" else "la próxima semana"
+            st.error(f"🚫 **Semana completa.** La {sala_seleccionada} no tiene horarios "
+                     f"disponibles {cuando}.")
+            st.markdown("\n\n".join(lineas))
         else:
-            st.dataframe(df, use_container_width=True)
+            st.success(f"✅ Hay disponibilidad en {len(disponibles)} día(s) de la semana.")
+            st.markdown("\n\n".join(lineas))
+
+            st.markdown("**Reserva en un horario disponible**")
+            dia_sel = st.selectbox(
+                "Día disponible", list(disponibles.keys()),
+                format_func=lambda d: f"{DIAS[d.weekday()]} {d.strftime('%d/%m/%Y')}")
+            libres_dia = disponibles[dia_sel]
+            ini_sel = st.selectbox("Hora de inicio disponible", libres_dia)
+
+            # Horas de fin posibles: mientras los bloques sigan libres
+            fines = []
+            i = HORAS.index(ini_sel)
+            while i < len(HORAS) - 1 and HORAS[i] in libres_dia:
+                fines.append(HORAS[i + 1])
+                i += 1
+
+            with st.form("form_disp", clear_on_submit=False):
+                fin_sel = st.selectbox("Hora de fin disponible", fines)
+                nombre_d = st.text_input("Nombre y Apellido", key="disp_nombre")
+                area_d = st.text_input("Área / Departamento", key="disp_area")
+                confirmar_d = st.form_submit_button("Reservar este horario", type="primary")
+
+            if confirmar_d:
+                ok_d, msg_d = registrar_reserva(sala_seleccionada, dia_sel, ini_sel,
+                                                fin_sel, nombre_d, area_d)
+                if ok_d:
+                    st.session_state.msg_disp = (ok_d, msg_d)
+                    st.rerun()          # refresca la lista con el horario ya ocupado
+                else:
+                    st.error(msg_d)
+
+        with st.expander("📋 Ver las reservas de un día específico"):
+            fecha_consulta = st.date_input("Filtrar por Fecha", key="fecha_cons")
+
+            conn = sqlite3.connect(DB)
+            df = pd.read_sql_query('''
+                SELECT inicio AS [Inicio], fin AS [Fin], nombre AS [Reservado por], area AS [Área]
+                FROM reservas
+                WHERE sala = ? AND fecha = ?
+                ORDER BY inicio ASC
+            ''', conn, params=(sala_seleccionada, str(fecha_consulta)))
+            conn.close()
+
+            if df.empty:
+                st.info(f"No hay reservas registradas para el {fecha_consulta.strftime('%d/%m/%Y')} en la {sala_seleccionada}.")
+            else:
+                st.dataframe(df, use_container_width=True)
 
 with col_der:
     st.markdown(
         f"<h3 style='color:{NARANJA};margin-bottom:0;'>🔴 Reservas en vivo</h3>",
         unsafe_allow_html=True)
-    st.radio("Selecciona la sala", SALAS, horizontal=True, key="sala_sel")
+    st.radio("Selecciona la sala", SALAS, horizontal=True, key="sala_sel",
+             on_change=_sala_desde_botones)
     panel_en_vivo(st.session_state.sala_sel)
 
 # ------------------------------------------------------------------
