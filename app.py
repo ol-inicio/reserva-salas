@@ -25,54 +25,17 @@ ZONA = ZoneInfo("America/Lima")
 
 st.markdown(f"""
 <style>
-:root{{--fila:clamp(19px, calc((100vh - 360px) / 25), 30px);}}
-.block-container{{padding-top:2.2rem !important;}}
-.titulo{{font-size:1.8rem;}}
-
-/* Cuadrícula compacta: filas pegadas y columnas que NUNCA se apilan (tampoco en celular) */
-.st-key-grilla, .st-key-grilla [data-testid="stVerticalBlock"]{{gap:0 !important;}}
-.st-key-grilla [data-testid="stMarkdownContainer"]{{margin:0 !important;}}
-.st-key-grilla [data-testid="stElementContainer"]{{width:100% !important;}}
-.st-key-grilla [data-testid="stHorizontalBlock"]{{gap:2px !important;flex-direction:row !important;
-    flex-wrap:nowrap !important;align-items:stretch;}}
-.st-key-grilla [data-testid="stHorizontalBlock"] > div{{flex:1 1 0 !important;width:auto !important;min-width:0 !important;}}
-.st-key-grilla [data-testid="stHorizontalBlock"] > div:first-child{{flex:0 0 108px !important;width:108px !important;}}
-
-/* Cada casilla ocupa TODO el ancho de su campo y una altura baja */
-.st-key-grilla [data-testid="stButton"]{{width:100% !important;}}
-.st-key-grilla button{{width:100% !important;height:var(--fila) !important;min-height:var(--fila) !important;
-    padding:0 !important;border-radius:0;box-sizing:border-box;line-height:1;}}
-.st-key-grilla button p{{margin:0 !important;font-size:11px !important;line-height:1 !important;}}
-
-/* Libre = verde, Elegido = morado (con línea clara para ver cada bloque) */
+.block-container{{padding-top:3rem !important;}}
+/* Cuadrícula compacta */
+.st-key-grilla [data-testid="stVerticalBlock"]{{gap:3px;}}
+.st-key-grilla [data-testid="stHorizontalBlock"]{{gap:3px;}}
+.st-key-grilla [data-testid="stButton"]{{width:100%;}}
+.st-key-grilla button{{width:100%;min-height:34px;height:34px;padding:0;font-size:12px;border-radius:4px;}}
+/* Libre = verde, Elegido = morado */
 [class*="st-key-lib_"] button{{background:{VERDE}22;color:{VERDE};border:1px solid {VERDE}55;}}
-[class*="st-key-lib_"] button:hover{{background:{VERDE}66;border-color:{VERDE};color:{VERDE};}}
-[class*="st-key-sel_"] button{{background:{MORADO};color:white;border:1px solid #ffffffaa;font-weight:bold;}}
-[class*="st-key-sel_"] button:hover{{background:{MORADO}cc;color:white;border-color:#ffffff;}}
-
-/* Encabezados y horas */
-.celda-hora{{height:var(--fila);display:flex;align-items:center;font-weight:bold;color:{AZUL};
-    white-space:nowrap;font-size:12px;}}
-.enc-hora,.enc-dia{{background:{AZUL};color:white;border-radius:4px;font-weight:bold;margin-bottom:3px;}}
-.enc-hora{{padding:8px 6px;}}
-.enc-dia{{padding:4px 2px;font-size:13px;line-height:1.25;text-align:center;}}
-.enc-dia .fecha{{font-weight:normal;font-size:11px;}}
-.h-corto,.d-corto{{display:none;}}
-
-/* Celular */
-@media (max-width: 640px){{
-  :root{{--fila:26px;}}
-  .block-container{{padding-left:.6rem !important;padding-right:.6rem !important;}}
-  .titulo{{font-size:1.15rem;}}
-  .h-full,.d-full,.solo-pc{{display:none !important;}}
-  .h-corto,.d-corto{{display:inline !important;}}
-  .st-key-grilla [data-testid="stHorizontalBlock"] > div:first-child{{flex:0 0 42px !important;width:42px !important;}}
-  .st-key-grilla button p{{font-size:9px !important;}}
-  .celda-hora{{font-size:10px;}}
-  .enc-dia{{font-size:11px;padding:3px 0;}}
-  .enc-dia .fecha{{font-size:9px;}}
-  .enc-hora{{padding:8px 2px;font-size:11px;}}
-}}
+[class*="st-key-lib_"] button:hover{{background:{VERDE}55;border-color:{VERDE};color:{VERDE};}}
+[class*="st-key-sel_"] button{{background:{MORADO};color:white;border:1px solid {MORADO};font-weight:bold;}}
+[class*="st-key-sel_"] button:hover{{background:{MORADO}cc;color:white;border-color:{MORADO};}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -100,14 +63,6 @@ def lunes_actual():
     """Lunes de la semana en curso (hora de Lima). Cada lunes a las 00:00
     la tabla pasa sola a la semana nueva, limpia y lista para reservar."""
     return lunes_de(hoy())
-
-
-def boton(texto, **kw):
-    """st.button que ocupa todo el ancho de su casilla (compatible con varias versiones)."""
-    try:
-        return st.button(texto, width="stretch", **kw)
-    except TypeError:
-        return st.button(texto, use_container_width=True, **kw)
 
 
 # Bloques de 30 min: 08:00 -> 20:00
@@ -204,6 +159,8 @@ if "admin_ver" not in st.session_state:
     st.session_state.admin_ver = 0
 if "sala_sel" not in st.session_state:
     st.session_state.sala_sel = SALAS[0]
+if "panel_otra" not in st.session_state:
+    st.session_state.panel_otra = hoy()
 if "panel_modo" not in st.session_state:
     st.session_state.panel_modo = "Esta semana"
 if "seleccion" not in st.session_state:
@@ -324,21 +281,16 @@ def boton_reservar(key):
 # ------------------------------------------------------------------
 @st.fragment(run_every="10s")
 def panel_en_vivo(sala):
-    c_sem, c_ley = st.columns([2, 3], vertical_alignment="center")
-    with c_sem:
-        modo = st.radio("Semana", ["Esta semana", "Próxima semana"],
-                        horizontal=True, key="panel_modo", label_visibility="collapsed")
-    with c_ley:
-        st.markdown(
-            f"<span style='font-size:13px;'>"
-            f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
-            f"<span style='color:{MORADO};'>■</span> Elegido por ti &nbsp; "
-            f"<span style='color:{NARANJA};'>■</span> Reservado</span>",
-            unsafe_allow_html=True)
+    modo = st.radio("Semana", ["Esta semana", "Próxima semana", "Otra semana"],
+                    horizontal=True, key="panel_modo")
 
-    lunes = lunes_actual()
-    if modo == "Próxima semana":
-        lunes += datetime.timedelta(days=7)
+    if modo == "Esta semana":
+        lunes = lunes_actual()
+    elif modo == "Próxima semana":
+        lunes = lunes_actual() + datetime.timedelta(days=7)
+    else:
+        dia_elegido = st.date_input("Elige cualquier día de la semana que quieres ver", key="panel_otra")
+        lunes = lunes_de(dia_elegido)
 
     dias = [lunes + datetime.timedelta(days=i) for i in range(5)]
 
@@ -346,6 +298,13 @@ def panel_en_vivo(sala):
         f"<b style='color:{AZUL};'>{html.escape(sala)}</b> · Semana del "
         f"<b>{dias[0].strftime('%d/%m/%Y')}</b> al <b>{dias[4].strftime('%d/%m/%Y')}</b> "
         f"<span style='opacity:.6;font-size:12px;'>· hora de Lima {ahora().strftime('%H:%M:%S')} (se actualiza cada 10 s)</span>",
+        unsafe_allow_html=True)
+
+    st.markdown(
+        f"<span style='font-size:13px;'>"
+        f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
+        f"<span style='color:{MORADO};'>■</span> Elegido por ti &nbsp; "
+        f"<span style='color:{NARANJA};'>■</span> Reservado</span>",
         unsafe_allow_html=True)
 
     # Resumen de lo elegido
@@ -366,16 +325,16 @@ def panel_en_vivo(sala):
         # Encabezado
         enc = st.columns(pesos)
         enc[0].markdown(
-            "<div class='enc-hora'><span class='h-full'>Horario</span>"
-            "<span class='h-corto'>Hora</span></div>", unsafe_allow_html=True)
+            f"<div style='background:{AZUL};color:white;font-weight:bold;padding:8px;"
+            f"border-radius:4px;'>Horario</div>", unsafe_allow_html=True)
         for i, d in enumerate(dias):
             es_hoy = (d == hoy())
             borde = f"border-bottom:4px solid {NARANJA};" if es_hoy else ""
-            extra = "<span class='solo-pc'> · hoy</span>" if es_hoy else ""
+            extra = " · hoy" if es_hoy else ""
             enc[i + 1].markdown(
-                f"<div class='enc-dia' style='{borde}'>"
-                f"<span class='d-full'>{DIAS[i]}</span><span class='d-corto'>{DIAS[i][:3]}</span><br>"
-                f"<span class='fecha'>{d.strftime('%d/%m')}{extra}</span></div>",
+                f"<div style='background:{AZUL};color:white;text-align:center;padding:6px;"
+                f"border-radius:4px;font-size:13px;font-weight:bold;{borde}'>{DIAS[i]}<br>"
+                f"<span style='font-weight:normal;font-size:11px;'>{d.strftime('%d/%m')}{extra}</span></div>",
                 unsafe_allow_html=True)
 
         # Filas de 30 min
@@ -383,8 +342,8 @@ def panel_en_vivo(sala):
             h, h_fin = HORAS[idx], HORAS[idx + 1]
             fila = st.columns(pesos)
             fila[0].markdown(
-                f"<div class='celda-hora'><span class='h-full'>{h} - {h_fin}</span>"
-                f"<span class='h-corto'>{h}</span></div>",
+                f"<div style='height:34px;display:flex;align-items:center;font-weight:bold;"
+                f"color:{AZUL};white-space:nowrap;'>{h} - {h_fin}</div>",
                 unsafe_allow_html=True)
 
             for j, d in enumerate(dias):
@@ -396,45 +355,29 @@ def panel_en_vivo(sala):
                         # Reservado -> naranja (si estaba elegido, se descarta)
                         st.session_state.seleccion.discard(clave)
                         r = ocupado.iloc[0]
-                        pos_ini = HORAS.index(r["inicio"]) if r["inicio"] in HORAS else idx
-                        pos_fin = HORAS.index(r["fin"]) if r["fin"] in HORAS else idx + 1
-                        desplazo = idx - pos_ini
+                        desplazo = idx - HORAS.index(r["inicio"]) if r["inicio"] in HORAS else 0
                         if desplazo == 0:
                             texto = html.escape(f"{r['nombre']} · {r['area']}")
                         elif desplazo == 1:
                             texto = html.escape(f"{r['inicio']} - {r['fin']}")
                         else:
                             texto = ""
-
-                        # Una reserva se ve como un solo bloque continuo; la línea blanca
-                        # arriba y abajo marca dónde empieza y termina cada reserva
-                        # (así se distingue cuando dos reservas están pegadas).
-                        es_primero = idx <= pos_ini
-                        es_ultimo = idx >= pos_fin - 1
-                        linea_sup = "2px solid #fff" if es_primero else "0"
-                        linea_inf = "2px solid #fff" if es_ultimo else "0"
-                        rs = "4px" if es_primero else "0"
-                        ri = "4px" if es_ultimo else "0"
                         tip = html.escape(f"{r['nombre']} · {r['area']} ({r['inicio']} - {r['fin']})")
                         st.markdown(
-                            f"<div title='{tip}' style='height:var(--fila);box-sizing:border-box;"
-                            f"background:{NARANJA};color:white;font-size:10px;font-weight:bold;"
-                            f"display:flex;align-items:center;justify-content:center;padding:0 4px;"
-                            f"overflow:hidden;white-space:nowrap;text-overflow:ellipsis;"
-                            f"border-left:2px solid #fff;border-right:2px solid #fff;"
-                            f"border-top:{linea_sup};border-bottom:{linea_inf};"
-                            f"border-radius:{rs} {rs} {ri} {ri};'>{texto}</div>",
+                            f"<div title='{tip}' style='height:34px;background:{NARANJA};color:white;"
+                            f"font-size:11px;font-weight:bold;display:flex;align-items:center;"
+                            f"justify-content:center;border-radius:4px;padding:0 4px;"
+                            f"overflow:hidden;white-space:nowrap;text-overflow:ellipsis;'>{texto}</div>",
                             unsafe_allow_html=True)
                     elif es_pasado(d, h_fin):
                         st.session_state.seleccion.discard(clave)
                         st.markdown(
-                            "<div style='height:var(--fila);background:#8882;border:1px solid #8881;"
-                            "box-sizing:border-box;'></div>",
+                            "<div style='height:34px;background:#8882;border-radius:4px;'></div>",
                             unsafe_allow_html=True)
                     elif clave in st.session_state.seleccion:
-                        boton("✓ Elegido", key=f"sel_{d}_{h}", on_click=alternar, args=(clave,))
+                        st.button("✓ Elegido", key=f"sel_{d}_{h}", on_click=alternar, args=(clave,))
                     else:
-                        boton("Libre", key=f"lib_{d}_{h}", on_click=alternar, args=(clave,))
+                        st.button("Libre", key=f"lib_{d}_{h}", on_click=alternar, args=(clave,))
 
 
 # ------------------------------------------------------------------
@@ -616,7 +559,7 @@ with col_logo:
 with col_titulo:
     st.markdown(
         f"""
-        <div class='titulo' style='text-align:center;font-weight:800;line-height:1.25;margin:0;'>
+        <div style='text-align:center;font-size:1.8rem;font-weight:800;line-height:1.25;margin:0;'>
             <span style='color:{AZUL};'>Bienvenido a tu reserva de sala de reuniones</span>
             <span style='color:{NARANJA};'>Grupo OL</span>
         </div>
@@ -635,9 +578,13 @@ if "msg_ok" in st.session_state:
 st.markdown(
     f"<h3 style='color:{NARANJA};margin-bottom:0;'>🔴 Reservas en vivo</h3>",
     unsafe_allow_html=True)
-st.radio("Selecciona la sala", SALAS, horizontal=True, key="sala_sel",
-         on_change=_cambio_sala, label_visibility="collapsed")
+st.caption("1) Elige la sala · 2) Haz clic en los horarios libres que necesitas · "
+           "3) Pulsa «Reservar» y escribe tu nombre y área.")
 
+st.radio("Selecciona la sala", SALAS, horizontal=True, key="sala_sel",
+         on_change=_cambio_sala)
+
+boton_reservar("btn_reservar_arriba")
 panel_en_vivo(st.session_state.sala_sel)
 boton_reservar("btn_reservar_abajo")
 
