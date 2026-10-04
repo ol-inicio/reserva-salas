@@ -28,10 +28,10 @@ ZONA = ZoneInfo("America/Lima")
 
 st.markdown(f"""
 <style>
-:root{{--fila:clamp(28px, calc((100vh - 240px) / 25), 40px);}}
-.block-container{{padding-top:1.5rem !important;}}
+:root{{--fila:clamp(24px, calc((100vh - 290px) / 21), 40px);}}
+.block-container{{padding-top:2rem !important;}}
 .block-container [data-testid="stVerticalBlock"]{{gap:.6rem;}}
-.titulo-principal{{font-size:clamp(1.4rem, 2.3vw, 2.1rem);font-weight:800;line-height:1.1;margin:0;white-space:nowrap;}}
+.titulo-principal{{font-size:clamp(1.2rem, 1.9vw, 1.7rem);font-weight:800;line-height:1.1;margin:0;white-space:nowrap;}}
 
 /* Cuadrícula: filas pegadas y columnas que NUNCA se apilan (tampoco en celular) */
 .st-key-grilla, .st-key-grilla [data-testid="stVerticalBlock"]{{gap:0 !important;}}
@@ -67,11 +67,20 @@ st.markdown(f"""
 .enc-dia .fecha{{font-weight:normal;font-size:12px;}}
 .h-corto,.d-corto{{display:none;}}
 
+/* Botones grandes para elegir la sala */
+[class*="st-key-sala_"] button{{min-height:48px;border-radius:8px;}}
+[class*="st-key-sala_"] button p{{font-size:16px !important;font-weight:700 !important;}}
+[class*="st-key-sala_off_"] button{{background:transparent;border:2px solid {AZUL_TIT};color:{AZUL_TIT};}}
+[class*="st-key-sala_off_"] button:hover{{background:{AZUL_TIT}22;border-color:{AZUL_TIT};color:{AZUL_TIT};}}
+[class*="st-key-sala_on_"] button{{background:{AZUL_TIT};border:2px solid {AZUL_TIT};color:white;box-shadow:0 0 0 2px {NARANJA};}}
+[class*="st-key-sala_on_"] button:hover{{background:{AZUL_TIT};color:white;border-color:{AZUL_TIT};}}
+
 /* Celular */
 @media (max-width: 640px){{
   :root{{--fila:32px;}}
   .block-container{{padding-left:.6rem !important;padding-right:.6rem !important;}}
   .titulo-principal{{font-size:1.25rem;white-space:normal;}}
+  [class*="st-key-sala_"] button p{{font-size:14px !important;}}
   .h-full,.d-full,.solo-pc{{display:none !important;}}
   .h-corto,.d-corto{{display:inline !important;}}
   .st-key-grilla [data-testid="stHorizontalBlock"] > div:first-child{{flex:0 0 46px !important;width:46px !important;}}
@@ -106,9 +115,13 @@ def lunes_de(fecha):
 
 
 def lunes_actual():
-    """Lunes de la semana en curso (hora de Lima). Cada lunes a las 00:00
-    la tabla pasa sola a la semana nueva, limpia y lista para reservar."""
-    return lunes_de(hoy())
+    """Lunes de la semana que se muestra como «Esta semana» (hora de Lima).
+    Sábado y domingo la semana laboral ya terminó (no se puede reservar en el pasado),
+    por eso desde el sábado la tabla ya muestra la semana siguiente, limpia y lista."""
+    lunes = lunes_de(hoy())
+    if hoy().weekday() >= 5:
+        lunes += datetime.timedelta(days=7)
+    return lunes
 
 
 def boton(texto, **kw):
@@ -119,8 +132,8 @@ def boton(texto, **kw):
         return st.button(texto, use_container_width=True, **kw)
 
 
-# Bloques de 30 min: 08:00 -> 20:00
-def generar_horas(inicio="08:00", fin="20:00"):
+# Bloques de 30 min: 08:30 -> 19:00
+def generar_horas(inicio="08:30", fin="19:00"):
     horas = []
     h = datetime.datetime.strptime(inicio, "%H:%M")
     limite = datetime.datetime.strptime(fin, "%H:%M")
@@ -130,7 +143,21 @@ def generar_horas(inicio="08:00", fin="20:00"):
     return horas
 
 
-HORAS = generar_horas()  # 08:00 ... 20:00
+HORAS = generar_horas()  # 08:30 ... 19:00
+
+
+def indice_inicio(h):
+    """Fila donde empieza una reserva (0 si empezó antes del horario visible)."""
+    if h in HORAS:
+        return HORAS.index(h)
+    return 0 if a_min(h) < a_min(HORAS[0]) else len(HORAS) - 1
+
+
+def indice_fin(h):
+    """Fila donde termina una reserva (última si termina después del horario visible)."""
+    if h in HORAS:
+        return HORAS.index(h)
+    return len(HORAS) - 1 if a_min(h) > a_min(HORAS[-1]) else 0
 
 # ------------------------------------------------------------------
 # Base de datos
@@ -217,6 +244,13 @@ if "panel_modo" not in st.session_state:
     st.session_state.panel_modo = "Esta semana"
 if "seleccion" not in st.session_state:
     st.session_state.seleccion = set()      # claves "YYYY-MM-DD|HH:MM"
+
+
+def _elegir_sala(sala):
+    # Al cambiar de sala se limpia lo elegido y la tabla se actualiza sola
+    if st.session_state.sala_sel != sala:
+        st.session_state.sala_sel = sala
+        st.session_state.seleccion = set()
 
 
 def _cambio_sala():
@@ -333,18 +367,10 @@ def boton_reservar(key):
 # ------------------------------------------------------------------
 @st.fragment(run_every="10s")
 def panel_en_vivo(sala):
-    c_sem, c_ley = st.columns([2, 3], vertical_alignment="center")
+    c_sem, c_info, c_lim = st.columns([3, 7, 1], vertical_alignment="center")
     with c_sem:
         modo = st.radio("Semana", ["Esta semana", "Próxima semana"],
                         horizontal=True, key="panel_modo", label_visibility="collapsed")
-    with c_ley:
-        st.markdown(
-            f"<span style='font-size:13px;'>"
-            f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
-            f"<span style='color:{MORADO};'>■</span> Elegido por ti &nbsp; "
-            f"<span style='color:{NARANJA};'>■</span> Reservado &nbsp; "
-            f"<span style='color:#888;'>■</span> Pasado</span>",
-            unsafe_allow_html=True)
 
     lunes = lunes_actual()
     if modo == "Próxima semana":
@@ -352,24 +378,29 @@ def panel_en_vivo(sala):
 
     dias = [lunes + datetime.timedelta(days=i) for i in range(5)]
 
-    st.markdown(
-        f"<b style='color:{AZUL};'>{html.escape(sala)}</b> · Semana del "
-        f"<b>{dias[0].strftime('%d/%m/%Y')}</b> al <b>{dias[4].strftime('%d/%m/%Y')}</b> "
-        f"<span style='opacity:.6;font-size:12px;'>· hora de Lima {ahora().strftime('%H:%M:%S')} (se actualiza cada 10 s)</span>",
-        unsafe_allow_html=True)
-
-    # Resumen de lo elegido
+    # En la misma fila: datos de la semana, o el resumen de lo que estás eligiendo
     sel = st.session_state.seleccion
-    if sel:
-        resumen = " · ".join(f"{etiqueta_dia(f)[:3]} {f[8:10]}/{f[5:7]} {i}-{fn}"
-                             for f, i, fn in rangos_de_seleccion(sel))
-        c1, c2 = st.columns([5, 1], vertical_alignment="center")
-        c1.info(f"Elegido: {resumen}")
-        c2.button("Limpiar", on_click=limpiar_seleccion, key="btn_limpiar")
+    with c_info:
+        if sel:
+            resumen = " · ".join(f"{etiqueta_dia(f)[:3]} {f[8:10]}/{f[5:7]} {i}-{fn}"
+                                 for f, i, fn in rangos_de_seleccion(sel))
+            st.markdown(
+                f"<span style='background:{MORADO};color:white;padding:3px 10px;border-radius:4px;"
+                f"font-size:13px;font-weight:bold;'>Elegido: {resumen}</span>",
+                unsafe_allow_html=True)
+        else:
+            st.markdown(
+                f"<span style='font-size:14px;'><b style='color:{AZUL_TIT};'>{html.escape(sala)}</b> · "
+                f"Semana del <b>{dias[0].strftime('%d/%m/%Y')}</b> al <b>{dias[4].strftime('%d/%m/%Y')}</b> "
+                f"<span style='opacity:.6;font-size:12px;'>· hora de Lima {ahora().strftime('%H:%M:%S')}</span></span>",
+                unsafe_allow_html=True)
+    with c_lim:
+        if sel:
+            st.button("Limpiar", on_click=limpiar_seleccion, key="btn_limpiar")
 
     df = reservas_semana(sala, lunes)
     por_dia = [df[df["fecha"] == str(d)] for d in dias]
-    n_filas = len(HORAS) - 1          # 24 bloques de 30 min
+    n_filas = len(HORAS) - 1          # bloques de 30 min (08:30 a 19:00)
     pesos = [1.4, 2, 2, 2, 2, 2]
 
     with st.container(key="grilla"):
@@ -406,8 +437,8 @@ def panel_en_vivo(sala):
                         # Reservado -> naranja (si estaba elegido, se descarta)
                         st.session_state.seleccion.discard(clave)
                         r = ocupado.iloc[0]
-                        pos_ini = HORAS.index(r["inicio"]) if r["inicio"] in HORAS else idx
-                        pos_fin = HORAS.index(r["fin"]) if r["fin"] in HORAS else idx + 1
+                        pos_ini = indice_inicio(r["inicio"])
+                        pos_fin = indice_fin(r["fin"])
                         desplazo = idx - pos_ini
                         if desplazo == 0:
                             texto = html.escape(f"{r['nombre']} · {r['area']}")
@@ -505,6 +536,8 @@ def seccion_admin():
 
         # Incluye salas antiguas (ya retiradas) para que sus reservas se puedan ver/borrar
         opciones_sala = SALAS + [s for s in df["sala"].dropna().unique() if s not in SALAS]
+        opciones_inicio = sorted(set(HORAS[:-1]) | set(df["inicio"].dropna()))
+        opciones_fin = sorted(set(HORAS[1:]) | set(df["fin"].dropna()))
 
         editado = st.data_editor(
             df_edit,
@@ -516,8 +549,8 @@ def seccion_admin():
                 "id": st.column_config.NumberColumn("ID", disabled=True),
                 "sala": st.column_config.SelectboxColumn("Sala", options=opciones_sala, required=True),
                 "fecha": st.column_config.DateColumn("Fecha", format="YYYY-MM-DD", required=True),
-                "inicio": st.column_config.SelectboxColumn("Inicio", options=HORAS[:-1], required=True),
-                "fin": st.column_config.SelectboxColumn("Fin", options=HORAS[1:], required=True),
+                "inicio": st.column_config.SelectboxColumn("Inicio", options=opciones_inicio, required=True),
+                "fin": st.column_config.SelectboxColumn("Fin", options=opciones_fin, required=True),
                 "nombre": st.column_config.TextColumn("Reservado por", required=True),
                 "area": st.column_config.TextColumn("Área", required=True),
             })
@@ -622,23 +655,41 @@ if "msg_ok" in st.session_state:
     st.toast("Reserva guardada", icon="✅")
 
 if os.path.exists("logo.png"):
-    c_logo, c_tit, c_sala = st.columns([1, 5, 7], vertical_alignment="center")
+    c_logo, c_tit, c_sala = st.columns([1, 4, 9], vertical_alignment="center")
     with c_logo:
         st.image("logo.png", width=56)
 else:
-    c_tit, c_sala = st.columns([5, 7], vertical_alignment="center")
+    c_tit, c_sala = st.columns([4, 9], vertical_alignment="center")
 
 with c_tit:
     st.markdown(
         f"<div class='titulo-principal'><span style='color:{AZUL_TIT};'>Reservas de salas</span> "
         f"<span style='color:{NARANJA};'>Grupo OL</span></div>",
         unsafe_allow_html=True)
+
+# Botones grandes: al elegir una sala, la tabla se actualiza sola
 with c_sala:
-    st.radio("Selecciona la sala", SALAS, horizontal=True, key="sala_sel",
-             on_change=_cambio_sala, label_visibility="collapsed")
+    cols_sala = st.columns(len(SALAS))
+    for i, (col, nombre_sala) in enumerate(zip(cols_sala, SALAS)):
+        activa = (nombre_sala == st.session_state.sala_sel)
+        with col:
+            boton(nombre_sala, key=f"sala_{'on' if activa else 'off'}_{i}",
+                  on_click=_elegir_sala, args=(nombre_sala,))
 
 panel_en_vivo(st.session_state.sala_sel)
-boton_reservar("btn_reservar_abajo")
+
+# Debajo de la tabla: botón de reservar + leyenda de colores
+c_btn, c_leyenda = st.columns([2, 5], vertical_alignment="center")
+with c_btn:
+    boton_reservar("btn_reservar_abajo")
+with c_leyenda:
+    st.markdown(
+        f"<span style='font-size:13px;'>"
+        f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
+        f"<span style='color:{MORADO};'>■</span> Elegido por ti &nbsp; "
+        f"<span style='color:{NARANJA};'>■</span> Reservado &nbsp; "
+        f"<span style='color:#888;'>■</span> Pasado</span>",
+        unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
 # Administración (ancho completo, debajo de todo)
