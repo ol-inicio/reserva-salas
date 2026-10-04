@@ -3,6 +3,7 @@ import datetime
 import sqlite3
 import html
 import io
+import os
 import pandas as pd
 from zoneinfo import ZoneInfo
 
@@ -12,6 +13,8 @@ from zoneinfo import ZoneInfo
 st.set_page_config(page_title="Reserva de Salas - Grupo OL", page_icon="📅", layout="wide")
 
 AZUL = "#1F4E9C"
+AZUL_TIT = "#3C82F6"     # azul más vivo para el título (se ve mejor sobre fondo oscuro)
+HORA_COLOR = "#FFD43B"  # color resaltante de las horas
 NARANJA = "#FF5A00"
 MORADO = "#7B2FF7"      # color de las casillas que el usuario está eligiendo
 VERDE = "#2e9e4f"
@@ -25,50 +28,56 @@ ZONA = ZoneInfo("America/Lima")
 
 st.markdown(f"""
 <style>
-:root{{--fila:clamp(19px, calc((100vh - 360px) / 25), 30px);}}
-.block-container{{padding-top:2.2rem !important;}}
-.titulo{{font-size:1.8rem;}}
+:root{{--fila:clamp(28px, calc((100vh - 240px) / 25), 40px);}}
+.block-container{{padding-top:1.5rem !important;}}
+.block-container [data-testid="stVerticalBlock"]{{gap:.6rem;}}
+.titulo-principal{{font-size:clamp(1.4rem, 2.3vw, 2.1rem);font-weight:800;line-height:1.1;margin:0;white-space:nowrap;}}
 
-/* Cuadrícula compacta: filas pegadas y columnas que NUNCA se apilan (tampoco en celular) */
+/* Cuadrícula: filas pegadas y columnas que NUNCA se apilan (tampoco en celular) */
 .st-key-grilla, .st-key-grilla [data-testid="stVerticalBlock"]{{gap:0 !important;}}
 .st-key-grilla [data-testid="stMarkdownContainer"]{{margin:0 !important;}}
 .st-key-grilla [data-testid="stElementContainer"]{{width:100% !important;}}
 .st-key-grilla [data-testid="stHorizontalBlock"]{{gap:2px !important;flex-direction:row !important;
     flex-wrap:nowrap !important;align-items:stretch;}}
 .st-key-grilla [data-testid="stHorizontalBlock"] > div{{flex:1 1 0 !important;width:auto !important;min-width:0 !important;}}
-.st-key-grilla [data-testid="stHorizontalBlock"] > div:first-child{{flex:0 0 108px !important;width:108px !important;}}
+.st-key-grilla [data-testid="stHorizontalBlock"] > div:first-child{{flex:0 0 118px !important;width:118px !important;}}
 
-/* Cada casilla ocupa TODO el ancho de su campo y una altura baja */
+/* Casillas: ocupan TODO el campo, con la palabra "Libre" bien legible */
 .st-key-grilla [data-testid="stButton"]{{width:100% !important;}}
 .st-key-grilla button{{width:100% !important;height:var(--fila) !important;min-height:var(--fila) !important;
     padding:0 !important;border-radius:0;box-sizing:border-box;line-height:1;}}
-.st-key-grilla button p{{margin:0 !important;font-size:11px !important;line-height:1 !important;}}
+.st-key-grilla button p{{margin:0 !important;font-size:13px !important;font-weight:600;line-height:1 !important;}}
 
 /* Libre = verde, Elegido = morado (con línea clara para ver cada bloque) */
 [class*="st-key-lib_"] button{{background:{VERDE}22;color:{VERDE};border:1px solid {VERDE}55;}}
 [class*="st-key-lib_"] button:hover{{background:{VERDE}66;border-color:{VERDE};color:{VERDE};}}
-[class*="st-key-sel_"] button{{background:{MORADO};color:white;border:1px solid #ffffffaa;font-weight:bold;}}
+[class*="st-key-sel_"] button{{background:{MORADO};color:white;border:1px solid #ffffffaa;}}
+[class*="st-key-sel_"] button p{{font-weight:800;}}
 [class*="st-key-sel_"] button:hover{{background:{MORADO}cc;color:white;border-color:#ffffff;}}
 
+/* Reservado (naranja) */
+.celda-res{{font-size:12px;}}
+
 /* Encabezados y horas */
-.celda-hora{{height:var(--fila);display:flex;align-items:center;font-weight:bold;color:{AZUL};
-    white-space:nowrap;font-size:12px;}}
+.celda-hora{{height:var(--fila);display:flex;align-items:center;font-weight:800;color:{HORA_COLOR};
+    white-space:nowrap;font-size:14px;letter-spacing:.2px;}}
 .enc-hora,.enc-dia{{background:{AZUL};color:white;border-radius:4px;font-weight:bold;margin-bottom:3px;}}
-.enc-hora{{padding:8px 6px;}}
-.enc-dia{{padding:4px 2px;font-size:13px;line-height:1.25;text-align:center;}}
-.enc-dia .fecha{{font-weight:normal;font-size:11px;}}
+.enc-hora{{padding:10px 8px;font-size:14px;}}
+.enc-dia{{padding:5px 2px;font-size:14px;line-height:1.25;text-align:center;}}
+.enc-dia .fecha{{font-weight:normal;font-size:12px;}}
 .h-corto,.d-corto{{display:none;}}
 
 /* Celular */
 @media (max-width: 640px){{
-  :root{{--fila:26px;}}
+  :root{{--fila:32px;}}
   .block-container{{padding-left:.6rem !important;padding-right:.6rem !important;}}
-  .titulo{{font-size:1.15rem;}}
+  .titulo-principal{{font-size:1.25rem;white-space:normal;}}
   .h-full,.d-full,.solo-pc{{display:none !important;}}
   .h-corto,.d-corto{{display:inline !important;}}
-  .st-key-grilla [data-testid="stHorizontalBlock"] > div:first-child{{flex:0 0 42px !important;width:42px !important;}}
-  .st-key-grilla button p{{font-size:9px !important;}}
-  .celda-hora{{font-size:10px;}}
+  .st-key-grilla [data-testid="stHorizontalBlock"] > div:first-child{{flex:0 0 46px !important;width:46px !important;}}
+  .st-key-grilla button p{{font-size:10px !important;}}
+  .celda-res{{font-size:9px;}}
+  .celda-hora{{font-size:11px;}}
   .enc-dia{{font-size:11px;padding:3px 0;}}
   .enc-dia .fecha{{font-size:9px;}}
   .enc-hora{{padding:8px 2px;font-size:11px;}}
@@ -333,7 +342,8 @@ def panel_en_vivo(sala):
             f"<span style='font-size:13px;'>"
             f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
             f"<span style='color:{MORADO};'>■</span> Elegido por ti &nbsp; "
-            f"<span style='color:{NARANJA};'>■</span> Reservado</span>",
+            f"<span style='color:{NARANJA};'>■</span> Reservado &nbsp; "
+            f"<span style='color:#888;'>■</span> Pasado</span>",
             unsafe_allow_html=True)
 
     lunes = lunes_actual()
@@ -417,8 +427,8 @@ def panel_en_vivo(sala):
                         ri = "4px" if es_ultimo else "0"
                         tip = html.escape(f"{r['nombre']} · {r['area']} ({r['inicio']} - {r['fin']})")
                         st.markdown(
-                            f"<div title='{tip}' style='height:var(--fila);box-sizing:border-box;"
-                            f"background:{NARANJA};color:white;font-size:10px;font-weight:bold;"
+                            f"<div class='celda-res' title='{tip}' style='height:var(--fila);box-sizing:border-box;"
+                            f"background:{NARANJA};color:white;font-weight:bold;"
                             f"display:flex;align-items:center;justify-content:center;padding:0 4px;"
                             f"overflow:hidden;white-space:nowrap;text-overflow:ellipsis;"
                             f"border-left:2px solid #fff;border-right:2px solid #fff;"
@@ -605,38 +615,27 @@ def seccion_admin():
 
 
 # ------------------------------------------------------------------
-# Cabecera: logo + título centrado
-# ------------------------------------------------------------------
-col_logo, col_titulo, _ = st.columns([1, 8, 1], vertical_alignment="center")
-with col_logo:
-    try:
-        st.image("logo.png", width=80)
-    except Exception:
-        pass
-with col_titulo:
-    st.markdown(
-        f"""
-        <div class='titulo' style='text-align:center;font-weight:800;line-height:1.25;margin:0;'>
-            <span style='color:{AZUL};'>Bienvenido a tu reserva de sala de reuniones</span>
-            <span style='color:{NARANJA};'>Grupo OL</span>
-        </div>
-        """,
-        unsafe_allow_html=True)
-
-st.divider()
-
-# ------------------------------------------------------------------
-# Cronograma a todo el ancho
+# Parte superior compacta: título + elección de sala en una sola fila
 # ------------------------------------------------------------------
 if "msg_ok" in st.session_state:
     st.success(st.session_state.pop("msg_ok"))
     st.toast("Reserva guardada", icon="✅")
 
-st.markdown(
-    f"<h3 style='color:{NARANJA};margin-bottom:0;'>🔴 Reservas en vivo</h3>",
-    unsafe_allow_html=True)
-st.radio("Selecciona la sala", SALAS, horizontal=True, key="sala_sel",
-         on_change=_cambio_sala, label_visibility="collapsed")
+if os.path.exists("logo.png"):
+    c_logo, c_tit, c_sala = st.columns([1, 5, 7], vertical_alignment="center")
+    with c_logo:
+        st.image("logo.png", width=56)
+else:
+    c_tit, c_sala = st.columns([5, 7], vertical_alignment="center")
+
+with c_tit:
+    st.markdown(
+        f"<div class='titulo-principal'><span style='color:{AZUL_TIT};'>Reservas de salas</span> "
+        f"<span style='color:{NARANJA};'>Grupo OL</span></div>",
+        unsafe_allow_html=True)
+with c_sala:
+    st.radio("Selecciona la sala", SALAS, horizontal=True, key="sala_sel",
+             on_change=_cambio_sala, label_visibility="collapsed")
 
 panel_en_vivo(st.session_state.sala_sel)
 boton_reservar("btn_reservar_abajo")
