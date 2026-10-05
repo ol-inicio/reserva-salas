@@ -4,6 +4,8 @@ import sqlite3
 import html
 import io
 import os
+import re
+import hashlib
 import pandas as pd
 from zoneinfo import ZoneInfo
 
@@ -23,6 +25,7 @@ SALAS = ["Sala Tercer Piso", "Sala Piso 5", "Sala Septimo Piso"]
 DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
 
 CLAVE_SOPORTE = "soporte@2027"   # clave para administración (editar / borrar / Excel)
+MAX_INTENTOS_PIN = 5             # intentos fallidos de PIN permitidos por sesión y reserva
 
 ZONA = ZoneInfo("America/Lima")
 
@@ -55,7 +58,20 @@ st.markdown(f"""
 [class*="st-key-sel_"] button p{{font-weight:800;}}
 [class*="st-key-sel_"] button:hover{{background:{MORADO}cc;color:white;border-color:#ffffff;}}
 
-/* Reservado (naranja) */
+/* Reservado (naranja) - se puede pulsar para liberar con el PIN.
+   Tipos de clave: res_x_ (bloque único), res_i_ (primero), res_m_ (medio), res_f_ (último) */
+[class*="st-key-res_"] button{{background:{NARANJA};color:white;border:0;
+    border-left:2px solid #fff;border-right:2px solid #fff;border-radius:0;overflow:hidden;}}
+[class*="st-key-res_"] button:hover{{background:#E04E00;color:white;}}
+[class*="st-key-res_"] button:focus{{color:white;}}
+[class*="st-key-res_"] button div{{overflow:hidden;max-width:100%;}}
+[class*="st-key-res_"] button p{{font-size:12px !important;font-weight:700;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;max-width:100%;}}
+[class*="st-key-res_x_"] button{{border-top:2px solid #fff;border-bottom:2px solid #fff;border-radius:4px;}}
+[class*="st-key-res_i_"] button{{border-top:2px solid #fff;border-radius:4px 4px 0 0;}}
+[class*="st-key-res_f_"] button{{border-bottom:2px solid #fff;border-radius:0 0 4px 4px;}}
+
+/* Reservado en el pasado (no se puede pulsar) */
 .celda-res{{font-size:12px;}}
 
 /* Encabezados y horas */
@@ -85,6 +101,7 @@ st.markdown(f"""
   .h-corto,.d-corto{{display:inline !important;}}
   .st-key-grilla [data-testid="stHorizontalBlock"] > div:first-child{{flex:0 0 46px !important;width:46px !important;}}
   .st-key-grilla button p{{font-size:10px !important;}}
+  [class*="st-key-res_"] button p{{font-size:9px !important;}}
   .celda-res{{font-size:9px;}}
   .celda-hora{{font-size:11px;}}
   .enc-dia{{font-size:11px;padding:3px 0;}}
@@ -132,6 +149,15 @@ def boton(texto, **kw):
         return st.button(texto, use_container_width=True, **kw)
 
 
+def md_escape(t):
+    """Evita que nombres con * _ ` etc. se interpreten como formato en el texto de un botón."""
+    return re.sub(r'([\\`*_\[\]$~<>#|])', r'\\\1', str(t))
+
+
+def hash_pin(pin):
+    return hashlib.sha256(("OL|" + str(pin)).encode("utf-8")).hexdigest()
+
+
 # Bloques de 30 min: 08:30 -> 19:00
 def generar_horas(inicio="08:30", fin="19:00"):
     horas = []
@@ -176,6 +202,10 @@ def init_db():
             area TEXT
         )
     ''')
+    # Agrega la columna del PIN si la base de datos es anterior (conserva las reservas existentes)
+    columnas = [fila[1] for fila in c.execute("PRAGMA table_info(reservas)").fetchall()]
+    if "pin_hash" not in columnas:
+        c.execute("ALTER TABLE reservas ADD COLUMN pin_hash TEXT")
     conn.commit()
     conn.close()
 
@@ -201,11 +231,20 @@ def reservas_semana(sala, lunes):
     viernes = lunes + datetime.timedelta(days=4)
     conn = sqlite3.connect(DB)
     df = pd.read_sql_query(
-        "SELECT fecha, inicio, fin, nombre, area FROM reservas "
+        "SELECT id, fecha, inicio, fin, nombre, area FROM reservas "
         "WHERE sala = ? AND fecha BETWEEN ? AND ?",
         conn, params=(sala, str(lunes), str(viernes)))
     conn.close()
     return df
+
+
+def obtener_reserva(res_id):
+    conn = sqlite3.connect(DB)
+    fila = conn.execute(
+        "SELECT id, sala, fecha, inicio, fin, nombre, area, pin_hash FROM reservas WHERE id = ?",
+        (int(res_id),)).fetchone()
+    conn.close()
+    return fila
 
 
 def todas_las_reservas():
@@ -244,6 +283,8 @@ if "panel_modo" not in st.session_state:
     st.session_state.panel_modo = "Esta semana"
 if "seleccion" not in st.session_state:
     st.session_state.seleccion = set()      # claves "YYYY-MM-DD|HH:MM"
+if "pin_fallos" not in st.session_state:
+    st.session_state.pin_fallos = {}        # id de reserva -> intentos fallidos
 
 
 def _elegir_sala(sala):
@@ -303,12 +344,16 @@ def es_pasado(d, h_fin):
 
 
 # ------------------------------------------------------------------
-# Guardar reservas (recién aquí se piden nombre y área)
+# Guardar reservas (recién aquí se piden nombre, área y PIN)
 # ------------------------------------------------------------------
-def guardar_reservas(sala, rangos, nombre, area):
+def guardar_reservas(sala, rangos, nombre, area, pin, pin2):
     """Valida y guarda todos los tramos elegidos. Devuelve (ok, mensaje)."""
     if not nombre.strip() or not area.strip():
         return False, "⚠️ Por favor completa tu Nombre y Área."
+    if not (pin.isdigit() and len(pin) == 4):
+        return False, "⚠️ El PIN debe tener exactamente 4 números."
+    if pin != pin2:
+        return False, "⚠️ Los dos PIN no coinciden. Vuelve a escribirlos."
     for f, ini, fin in rangos:
         d = datetime.date.fromisoformat(f)
         if d.weekday() >= 5:
@@ -323,11 +368,12 @@ def guardar_reservas(sala, rangos, nombre, area):
     c = conn.cursor()
     for f, ini, fin in rangos:
         c.execute(
-            "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area) VALUES (?,?,?,?,?,?)",
-            (sala, f, ini, fin, nombre.strip().upper(), area.strip().upper()))
+            "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) VALUES (?,?,?,?,?,?,?)",
+            (sala, f, ini, fin, nombre.strip().upper(), area.strip().upper(), hash_pin(pin)))
     conn.commit()
     conn.close()
-    return True, f"✅ ¡Reserva realizada con éxito en la {sala} para {nombre.strip().upper()}!"
+    return True, (f"✅ ¡Reserva realizada con éxito en la {sala} para {nombre.strip().upper()}! "
+                  f"Recuerda tu PIN: lo necesitarás para liberar o eliminar tu reserva.")
 
 
 @st.dialog("Confirmar tu reserva")
@@ -341,16 +387,105 @@ def dialogo_reserva():
     with st.form("form_confirma", clear_on_submit=False):
         nombre = st.text_input("Nombre y Apellido")
         area = st.text_input("Área / Departamento")
+        pin = st.text_input("PIN de 4 números (con él podrás liberar o eliminar tu reserva)",
+                            type="password", max_chars=4)
+        pin2 = st.text_input("Repite el PIN", type="password", max_chars=4)
         guardar = st.form_submit_button("Guardar reserva", type="primary")
+    st.caption("Anota tu PIN: solo quien lo conozca podrá liberar estos horarios.")
 
     if guardar:
-        ok, msg = guardar_reservas(sala, rangos, nombre, area)
+        ok, msg = guardar_reservas(sala, rangos, nombre, area, pin, pin2)
         if ok:
             st.session_state.seleccion = set()
             st.session_state.msg_ok = msg
             st.rerun()
         else:
             st.error(msg)
+
+
+# ------------------------------------------------------------------
+# Liberar / eliminar una reserva (solo con el PIN de quien reservó)
+# ------------------------------------------------------------------
+def liberar_bloque(res_id, h, h_fin):
+    """Quita solo el bloque h–h_fin de la reserva (recorta, parte en dos o elimina)."""
+    r = obtener_reserva(res_id)
+    if r is None:
+        return
+    _, sala, fecha, ini, fin, nombre, area, pin_hash = r
+    conn = sqlite3.connect(DB)
+    c = conn.cursor()
+    if ini == h and fin == h_fin:
+        c.execute("DELETE FROM reservas WHERE id = ?", (res_id,))
+    elif ini == h:
+        c.execute("UPDATE reservas SET inicio = ? WHERE id = ?", (h_fin, res_id))
+    elif fin == h_fin:
+        c.execute("UPDATE reservas SET fin = ? WHERE id = ?", (h, res_id))
+    else:
+        # Bloque del medio: la reserva se parte en dos (mismo PIN en ambas partes)
+        c.execute("UPDATE reservas SET fin = ? WHERE id = ?", (h, res_id))
+        c.execute(
+            "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) VALUES (?,?,?,?,?,?,?)",
+            (sala, fecha, h_fin, fin, nombre, area, pin_hash))
+    conn.commit()
+    conn.close()
+
+
+def eliminar_reserva(res_id):
+    conn = sqlite3.connect(DB)
+    conn.execute("DELETE FROM reservas WHERE id = ?", (res_id,))
+    conn.commit()
+    conn.close()
+
+
+@st.dialog("Liberar horario")
+def dialogo_liberar(res_id, fecha_txt, h):
+    r = obtener_reserva(res_id)
+    if r is None:
+        st.info("Esta reserva ya no existe.")
+        return
+    _, sala, fecha, ini, fin, nombre, area, pin_hash = r
+    h_fin = HORAS[HORAS.index(h) + 1]
+
+    st.markdown(f"**{sala}**  \n📅 {etiqueta_dia(fecha)} · {ini} a {fin}  \n👤 {nombre} · {area}")
+
+    if not pin_hash:
+        st.warning("Esta reserva se hizo sin PIN. Solo soporte puede modificarla "
+                   "(sección Administración).")
+        return
+
+    fallos = st.session_state.pin_fallos.get(res_id, 0)
+    if fallos >= MAX_INTENTOS_PIN:
+        st.error("🔒 Demasiados intentos con PIN incorrecto. Contacta a soporte.")
+        return
+
+    una_sola = (ini == h and fin == h_fin)
+    with st.form("form_liberar", clear_on_submit=False):
+        pin = st.text_input("PIN de la reserva (4 números)", type="password", max_chars=4)
+        if una_sola:
+            modo = "bloque"
+            st.caption(f"Se liberará el horario {h} - {h_fin}.")
+        else:
+            modo = st.radio(
+                "¿Qué quieres liberar?",
+                ["bloque", "todo"], horizontal=False,
+                format_func=lambda x: (f"Solo este bloque ({h} - {h_fin})" if x == "bloque"
+                                       else f"Toda la reserva ({ini} - {fin})"))
+        enviar = st.form_submit_button("Liberar", type="primary")
+
+    if enviar:
+        if hash_pin(pin) != pin_hash:
+            st.session_state.pin_fallos[res_id] = fallos + 1
+            quedan = MAX_INTENTOS_PIN - fallos - 1
+            st.error(f"❌ PIN incorrecto. Intentos restantes: {max(quedan, 0)}.")
+            return
+        st.session_state.pin_fallos.pop(res_id, None)
+        if modo == "todo":
+            eliminar_reserva(res_id)
+            st.session_state.msg_ok = "✅ Tu reserva fue eliminada."
+        else:
+            liberar_bloque(res_id, h, h_fin)
+            st.session_state.msg_ok = f"✅ Horario {h} - {h_fin} liberado."
+        st.rerun()
 
 
 def boton_reservar(key):
@@ -362,7 +497,8 @@ def boton_reservar(key):
 
 
 # ------------------------------------------------------------------
-# Cronograma semanal en vivo: clic en una casilla verde para elegirla
+# Cronograma semanal en vivo: clic en una casilla verde para elegirla,
+# clic en una casilla naranja (con tu PIN) para liberarla
 # (se actualiza solo cada 10 segundos, con la hora de Lima)
 # ------------------------------------------------------------------
 @st.fragment(run_every="10s")
@@ -437,13 +573,14 @@ def panel_en_vivo(sala):
                         # Reservado -> naranja (si estaba elegido, se descarta)
                         st.session_state.seleccion.discard(clave)
                         r = ocupado.iloc[0]
+                        rid = int(r["id"])
                         pos_ini = indice_inicio(r["inicio"])
                         pos_fin = indice_fin(r["fin"])
                         desplazo = idx - pos_ini
                         if desplazo == 0:
-                            texto = html.escape(f"{r['nombre']} · {r['area']}")
+                            texto = f"{r['nombre']} · {r['area']}"
                         elif desplazo == 1:
-                            texto = html.escape(f"{r['inicio']} - {r['fin']}")
+                            texto = f"{r['inicio']} - {r['fin']}"
                         else:
                             texto = ""
 
@@ -452,20 +589,33 @@ def panel_en_vivo(sala):
                         # (así se distingue cuando dos reservas están pegadas).
                         es_primero = idx <= pos_ini
                         es_ultimo = idx >= pos_fin - 1
-                        linea_sup = "2px solid #fff" if es_primero else "0"
-                        linea_inf = "2px solid #fff" if es_ultimo else "0"
-                        rs = "4px" if es_primero else "0"
-                        ri = "4px" if es_ultimo else "0"
-                        tip = html.escape(f"{r['nombre']} · {r['area']} ({r['inicio']} - {r['fin']})")
-                        st.markdown(
-                            f"<div class='celda-res' title='{tip}' style='height:var(--fila);box-sizing:border-box;"
-                            f"background:{NARANJA};color:white;font-weight:bold;"
-                            f"display:flex;align-items:center;justify-content:center;padding:0 4px;"
-                            f"overflow:hidden;white-space:nowrap;text-overflow:ellipsis;"
-                            f"border-left:2px solid #fff;border-right:2px solid #fff;"
-                            f"border-top:{linea_sup};border-bottom:{linea_inf};"
-                            f"border-radius:{rs} {rs} {ri} {ri};'>{texto}</div>",
-                            unsafe_allow_html=True)
+                        tip = f"{r['nombre']} · {r['area']} ({r['inicio']} - {r['fin']})"
+
+                        if es_pasado(d, h_fin):
+                            # Ya pasó: se ve naranja pero no se puede tocar
+                            linea_sup = "2px solid #fff" if es_primero else "0"
+                            linea_inf = "2px solid #fff" if es_ultimo else "0"
+                            rs = "4px" if es_primero else "0"
+                            ri = "4px" if es_ultimo else "0"
+                            st.markdown(
+                                f"<div class='celda-res' title='{html.escape(tip)}' "
+                                f"style='height:var(--fila);box-sizing:border-box;"
+                                f"background:{NARANJA};color:white;font-weight:bold;"
+                                f"display:flex;align-items:center;justify-content:center;padding:0 4px;"
+                                f"overflow:hidden;white-space:nowrap;text-overflow:ellipsis;"
+                                f"border-left:2px solid #fff;border-right:2px solid #fff;"
+                                f"border-top:{linea_sup};border-bottom:{linea_inf};"
+                                f"border-radius:{rs} {rs} {ri} {ri};'>{html.escape(texto)}</div>",
+                                unsafe_allow_html=True)
+                        else:
+                            tipo = ("x" if (es_primero and es_ultimo) else
+                                    "i" if es_primero else
+                                    "f" if es_ultimo else "m")
+                            etiqueta = md_escape(texto) if texto else "\u00a0"
+                            if boton(etiqueta, key=f"res_{tipo}_{rid}_{d}_{h}",
+                                     help=f"{tip} — clic para liberar con tu PIN"):
+                                st.session_state.res_click = (rid, str(d), h)
+                                st.rerun()      # recarga toda la app para abrir la ventana
                     elif es_pasado(d, h_fin):
                         st.session_state.seleccion.discard(clave)
                         st.markdown(
@@ -524,7 +674,8 @@ def seccion_admin():
     # ---------------- Editar reservas ----------------
     st.markdown(f"#### <span style='color:{AZUL};'>✏️ Editar fechas y reservas</span>",
                 unsafe_allow_html=True)
-    st.caption("Puedes cambiar sala, fecha, horas, nombre o área. "
+    st.caption("Soporte puede cambiar o eliminar cualquier reserva sin PIN (por ejemplo si alguien "
+               "olvidó el suyo). Puedes cambiar sala, fecha, horas, nombre o área. "
                "Para eliminar una fila, selecciónala y presiona la tecla Supr / el ícono de basura. "
                "Luego pulsa «Guardar cambios».")
 
@@ -652,7 +803,7 @@ def seccion_admin():
 # ------------------------------------------------------------------
 if "msg_ok" in st.session_state:
     st.success(st.session_state.pop("msg_ok"))
-    st.toast("Reserva guardada", icon="✅")
+    st.toast("Listo", icon="✅")
 
 if os.path.exists("logo.png"):
     c_logo, c_tit, c_sala = st.columns([1, 4, 9], vertical_alignment="center")
@@ -678,6 +829,11 @@ with c_sala:
 
 panel_en_vivo(st.session_state.sala_sel)
 
+# Si se pulsó una casilla naranja, se abre la ventana para liberarla con el PIN
+_clic_reserva = st.session_state.pop("res_click", None)
+if _clic_reserva:
+    dialogo_liberar(*_clic_reserva)
+
 # Debajo de la tabla: botón de reservar + leyenda de colores
 c_btn, c_leyenda = st.columns([2, 5], vertical_alignment="center")
 with c_btn:
@@ -687,7 +843,7 @@ with c_leyenda:
         f"<span style='font-size:13px;'>"
         f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
         f"<span style='color:{MORADO};'>■</span> Elegido por ti &nbsp; "
-        f"<span style='color:{NARANJA};'>■</span> Reservado &nbsp; "
+        f"<span style='color:{NARANJA};'>■</span> Reservado (clic + PIN para liberar) &nbsp; "
         f"<span style='color:#888;'>■</span> Pasado</span>",
         unsafe_allow_html=True)
 
