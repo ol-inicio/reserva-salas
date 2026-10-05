@@ -80,6 +80,14 @@ st.markdown(f"""
 [class*="st-key-rel_"] button:hover{{background:#BE123C;color:white;border-color:#fff;}}
 [class*="st-key-rel_"] button:focus{{color:white;}}
 
+/* Botón "Liberar horarios marcados": azul y pegado al de reservar */
+.st-key-btn_liberar_abajo button{{background:{AZUL_TIT};color:white;border:1px solid {AZUL_TIT};font-weight:700;}}
+.st-key-btn_liberar_abajo button:hover{{background:#2563EB;border-color:#2563EB;color:white;}}
+.st-key-btn_liberar_abajo button:focus{{color:white;}}
+.st-key-botonera [data-testid="stHorizontalBlock"]{{gap:.6rem !important;align-items:center;}}
+.st-key-botonera [data-testid="stHorizontalBlock"] > div{{flex:0 0 auto !important;width:auto !important;min-width:0 !important;}}
+.st-key-botonera [data-testid="stHorizontalBlock"] > div:last-child{{flex:1 1 0 !important;}}
+
 /* Reservado en el pasado (no se puede pulsar) */
 .celda-res{{font-size:12px;}}
 
@@ -920,20 +928,21 @@ with c_sala:
 panel_en_vivo(st.session_state.sala_sel)
 
 # Debajo de la tabla: botones de reservar / liberar + leyenda de colores
-c_btn1, c_btn2, c_leyenda = st.columns([2, 2, 5], vertical_alignment="center")
-with c_btn1:
-    boton_reservar("btn_reservar_abajo")
-with c_btn2:
-    boton_liberar("btn_liberar_abajo")
-with c_leyenda:
-    st.markdown(
-        f"<span style='font-size:13px;'>"
-        f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
-        f"<span style='color:{MORADO};'>■</span> Elegido para reservar &nbsp; "
-        f"<span style='color:{NARANJA};'>■</span> Reservado (clic para marcarlo) &nbsp; "
-        f"<span style='color:{ROJO};'>■</span> Marcado para liberar &nbsp; "
-        f"<span style='color:#888;'>■</span> Pasado</span>",
-        unsafe_allow_html=True)
+with st.container(key="botonera"):
+    c_btn1, c_btn2, c_leyenda = st.columns(3, vertical_alignment="center")
+    with c_btn1:
+        boton_reservar("btn_reservar_abajo")
+    with c_btn2:
+        boton_liberar("btn_liberar_abajo")
+    with c_leyenda:
+        st.markdown(
+            f"<span style='font-size:13px;'>"
+            f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
+            f"<span style='color:{MORADO};'>■</span> Elegido para reservar &nbsp; "
+            f"<span style='color:{NARANJA};'>■</span> Reservado (clic para marcarlo) &nbsp; "
+            f"<span style='color:{ROJO};'>■</span> Marcado para liberar &nbsp; "
+            f"<span style='color:#888;'>■</span> Pasado</span>",
+            unsafe_allow_html=True)
 
 # ------------------------------------------------------------------
 # Administración (ancho completo, debajo de todo)
