@@ -18,14 +18,17 @@ AZUL = "#1F4E9C"
 AZUL_TIT = "#3C82F6"     # azul más vivo para el título (se ve mejor sobre fondo oscuro)
 HORA_COLOR = "#FFD43B"  # color resaltante de las horas
 NARANJA = "#FF5A00"
-MORADO = "#7B2FF7"      # color de las casillas que el usuario está eligiendo
+MORADO = "#7B2FF7"      # casillas que el usuario está eligiendo para RESERVAR
+ROJO = "#E11D48"        # casillas que el usuario marcó para LIBERAR
 VERDE = "#2e9e4f"
 DB = "reservas.db"
 SALAS = ["Sala Tercer Piso", "Sala Piso 5", "Sala Septimo Piso"]
 DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
+MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
+         "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
 
 CLAVE_SOPORTE = "soporte@2027"   # clave para administración (editar / borrar / Excel)
-MAX_INTENTOS_PIN = 5             # intentos fallidos de PIN permitidos por sesión y reserva
+MAX_INTENTOS_PIN = 5             # intentos fallidos de PIN permitidos por sesión
 
 ZONA = ZoneInfo("America/Lima")
 
@@ -58,7 +61,7 @@ st.markdown(f"""
 [class*="st-key-sel_"] button p{{font-weight:800;}}
 [class*="st-key-sel_"] button:hover{{background:{MORADO}cc;color:white;border-color:#ffffff;}}
 
-/* Reservado (naranja) - se puede pulsar para liberar con el PIN.
+/* Reservado (naranja) - se puede pulsar para marcarlo y liberarlo con el PIN.
    Tipos de clave: res_x_ (bloque único), res_i_ (primero), res_m_ (medio), res_f_ (último) */
 [class*="st-key-res_"] button{{background:{NARANJA};color:white;border:0;
     border-left:2px solid #fff;border-right:2px solid #fff;border-radius:0;overflow:hidden;}}
@@ -70,6 +73,12 @@ st.markdown(f"""
 [class*="st-key-res_x_"] button{{border-top:2px solid #fff;border-bottom:2px solid #fff;border-radius:4px;}}
 [class*="st-key-res_i_"] button{{border-top:2px solid #fff;border-radius:4px 4px 0 0;}}
 [class*="st-key-res_f_"] button{{border-bottom:2px solid #fff;border-radius:0 0 4px 4px;}}
+
+/* Marcado para liberar = rojo */
+[class*="st-key-rel_"] button{{background:{ROJO};color:white;border:2px solid #fff;border-radius:4px;}}
+[class*="st-key-rel_"] button p{{font-weight:800;}}
+[class*="st-key-rel_"] button:hover{{background:#BE123C;color:white;border-color:#fff;}}
+[class*="st-key-rel_"] button:focus{{color:white;}}
 
 /* Reservado en el pasado (no se puede pulsar) */
 .celda-res{{font-size:12px;}}
@@ -126,19 +135,47 @@ def a_min(t):
     return int(h) * 60 + int(m)
 
 
+def min_a_hhmm(m):
+    """570 -> '09:30'"""
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
 def lunes_de(fecha):
     """Lunes de la semana a la que pertenece 'fecha'."""
     return fecha - datetime.timedelta(days=fecha.weekday())
 
 
 def lunes_actual():
-    """Lunes de la semana que se muestra como «Esta semana» (hora de Lima).
+    """Lunes de la semana en curso (hora de Lima).
     Sábado y domingo la semana laboral ya terminó (no se puede reservar en el pasado),
-    por eso desde el sábado la tabla ya muestra la semana siguiente, limpia y lista."""
+    por eso desde el sábado se toma la semana siguiente."""
     lunes = lunes_de(hoy())
     if hoy().weekday() >= 5:
         lunes += datetime.timedelta(days=7)
     return lunes
+
+
+def fecha_referencia():
+    """Día que define el mes que se muestra. Cambia solo cuando termina el mes."""
+    return hoy() if hoy().weekday() < 5 else lunes_actual()
+
+
+def semanas_del_mes(anio, mes):
+    """Lunes de cada semana laboral (lun-vie) que tiene al menos un día de ese mes.
+    Según el calendario son 4 o 5 semanas."""
+    primero = datetime.date(anio, mes, 1)
+    if mes == 12:
+        ultimo = datetime.date(anio, 12, 31)
+    else:
+        ultimo = datetime.date(anio, mes + 1, 1) - datetime.timedelta(days=1)
+    semanas = []
+    lunes = lunes_de(primero)
+    while lunes <= ultimo:
+        viernes = lunes + datetime.timedelta(days=4)
+        if viernes >= primero:          # descarta la semana vacía si el mes empieza sábado/domingo
+            semanas.append(lunes)
+        lunes += datetime.timedelta(days=7)
+    return semanas
 
 
 def boton(texto, **kw):
@@ -247,6 +284,17 @@ def obtener_reserva(res_id):
     return fila
 
 
+def reserva_en_bloque(sala, fecha, h):
+    """Id de la reserva que ocupa el bloque que empieza en h (o None)."""
+    conn = sqlite3.connect(DB)
+    fila = conn.execute(
+        "SELECT id FROM reservas WHERE sala = ? AND fecha = ? "
+        "AND time(inicio) <= time(?) AND time(fin) > time(?)",
+        (sala, str(fecha), h, h)).fetchone()
+    conn.close()
+    return fila[0] if fila else None
+
+
 def todas_las_reservas():
     conn = sqlite3.connect(DB)
     df = pd.read_sql_query(
@@ -279,12 +327,12 @@ if "admin_ver" not in st.session_state:
     st.session_state.admin_ver = 0
 if "sala_sel" not in st.session_state:
     st.session_state.sala_sel = SALAS[0]
-if "panel_modo" not in st.session_state:
-    st.session_state.panel_modo = "Esta semana"
 if "seleccion" not in st.session_state:
-    st.session_state.seleccion = set()      # claves "YYYY-MM-DD|HH:MM"
+    st.session_state.seleccion = set()      # casillas libres elegidas para reservar: "YYYY-MM-DD|HH:MM"
+if "liberar_sel" not in st.session_state:
+    st.session_state.liberar_sel = set()    # casillas reservadas marcadas para liberar
 if "pin_fallos" not in st.session_state:
-    st.session_state.pin_fallos = {}        # id de reserva -> intentos fallidos
+    st.session_state.pin_fallos = 0         # intentos fallidos de PIN al liberar
 
 
 def _elegir_sala(sala):
@@ -292,11 +340,7 @@ def _elegir_sala(sala):
     if st.session_state.sala_sel != sala:
         st.session_state.sala_sel = sala
         st.session_state.seleccion = set()
-
-
-def _cambio_sala():
-    # La selección pertenece a una sala: al cambiar de sala se limpia
-    st.session_state.seleccion = set()
+        st.session_state.liberar_sel = set()
 
 
 def alternar(clave):
@@ -307,8 +351,17 @@ def alternar(clave):
         sel.add(clave)
 
 
+def alternar_liberar(clave):
+    sel = st.session_state.liberar_sel
+    if clave in sel:
+        sel.discard(clave)
+    else:
+        sel.add(clave)
+
+
 def limpiar_seleccion():
     st.session_state.seleccion = set()
+    st.session_state.liberar_sel = set()
 
 
 def rangos_de_seleccion(sel):
@@ -404,87 +457,93 @@ def dialogo_reserva():
 
 
 # ------------------------------------------------------------------
-# Liberar / eliminar una reserva (solo con el PIN de quien reservó)
+# Liberar horarios (solo con el PIN de quien reservó)
 # ------------------------------------------------------------------
-def liberar_bloque(res_id, h, h_fin):
-    """Quita solo el bloque h–h_fin de la reserva (recorta, parte en dos o elimina)."""
-    r = obtener_reserva(res_id)
-    if r is None:
-        return
-    _, sala, fecha, ini, fin, nombre, area, pin_hash = r
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    if ini == h and fin == h_fin:
-        c.execute("DELETE FROM reservas WHERE id = ?", (res_id,))
-    elif ini == h:
-        c.execute("UPDATE reservas SET inicio = ? WHERE id = ?", (h_fin, res_id))
-    elif fin == h_fin:
-        c.execute("UPDATE reservas SET fin = ? WHERE id = ?", (h, res_id))
-    else:
-        # Bloque del medio: la reserva se parte en dos (mismo PIN en ambas partes)
-        c.execute("UPDATE reservas SET fin = ? WHERE id = ?", (h, res_id))
-        c.execute(
-            "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) VALUES (?,?,?,?,?,?,?)",
-            (sala, fecha, h_fin, fin, nombre, area, pin_hash))
-    conn.commit()
-    conn.close()
+def liberar_bloques(sala, claves, pin):
+    """Libera las casillas marcadas cuya reserva tenga ese PIN.
+    Devuelve (bloques_liberados, bloques_omitidos)."""
+    # 1) Agrupar las casillas marcadas por reserva
+    por_reserva = {}
+    for clave in claves:
+        f, h = clave.split("|")
+        rid = reserva_en_bloque(sala, f, h)
+        if rid is not None:
+            por_reserva.setdefault(rid, set()).add(h)
+
+    # 2) Decidir qué cambiar (solo reservas cuyo PIN coincide)
+    plan, liberados, omitidos = [], 0, 0
+    for rid, bloques in por_reserva.items():
+        r = obtener_reserva(rid)
+        if r is None:
+            continue
+        _, sala_r, fecha, ini, fin, nombre, area, pin_hash = r
+        if not pin_hash or hash_pin(pin) != pin_hash:
+            omitidos += len(bloques)
+            continue
+        todos = list(range(a_min(ini), a_min(fin), 30))
+        quitar = {a_min(h) for h in bloques}
+        quedan = [m for m in todos if m not in quitar]
+        rangos, desde, hasta = [], None, None
+        for m in quedan:                       # une bloques consecutivos que se conservan
+            if desde is not None and m == hasta:
+                hasta = m + 30
+            else:
+                if desde is not None:
+                    rangos.append((desde, hasta))
+                desde, hasta = m, m + 30
+        if desde is not None:
+            rangos.append((desde, hasta))
+        liberados += len(quitar & set(todos))
+        plan.append((rid, sala_r, fecha, nombre, area, pin_hash, rangos))
+
+    # 3) Guardar: se borra la reserva original y se vuelven a crear los tramos que se conservan
+    if plan:
+        conn = sqlite3.connect(DB)
+        c = conn.cursor()
+        for rid, sala_r, fecha, nombre, area, pin_hash, rangos in plan:
+            c.execute("DELETE FROM reservas WHERE id = ?", (rid,))
+            for a, b in rangos:
+                c.execute(
+                    "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (sala_r, fecha, min_a_hhmm(a), min_a_hhmm(b), nombre, area, pin_hash))
+        conn.commit()
+        conn.close()
+    return liberados, omitidos
 
 
-def eliminar_reserva(res_id):
-    conn = sqlite3.connect(DB)
-    conn.execute("DELETE FROM reservas WHERE id = ?", (res_id,))
-    conn.commit()
-    conn.close()
+@st.dialog("Liberar horarios")
+def dialogo_liberar():
+    sala = st.session_state.sala_sel
+    rangos = rangos_de_seleccion(st.session_state.liberar_sel)
+    st.markdown(f"**{sala}** · vas a liberar:")
+    for f, ini, fin in rangos:
+        st.write(f"🔴 {etiqueta_dia(f)} · {ini} a {fin}")
 
-
-@st.dialog("Liberar horario")
-def dialogo_liberar(res_id, fecha_txt, h):
-    r = obtener_reserva(res_id)
-    if r is None:
-        st.info("Esta reserva ya no existe.")
-        return
-    _, sala, fecha, ini, fin, nombre, area, pin_hash = r
-    h_fin = HORAS[HORAS.index(h) + 1]
-
-    st.markdown(f"**{sala}**  \n📅 {etiqueta_dia(fecha)} · {ini} a {fin}  \n👤 {nombre} · {area}")
-
-    if not pin_hash:
-        st.warning("Esta reserva se hizo sin PIN. Solo soporte puede modificarla "
-                   "(sección Administración).")
-        return
-
-    fallos = st.session_state.pin_fallos.get(res_id, 0)
+    fallos = st.session_state.pin_fallos
     if fallos >= MAX_INTENTOS_PIN:
         st.error("🔒 Demasiados intentos con PIN incorrecto. Contacta a soporte.")
         return
 
-    una_sola = (ini == h and fin == h_fin)
     with st.form("form_liberar", clear_on_submit=False):
-        pin = st.text_input("PIN de la reserva (4 números)", type="password", max_chars=4)
-        if una_sola:
-            modo = "bloque"
-            st.caption(f"Se liberará el horario {h} - {h_fin}.")
-        else:
-            modo = st.radio(
-                "¿Qué quieres liberar?",
-                ["bloque", "todo"], horizontal=False,
-                format_func=lambda x: (f"Solo este bloque ({h} - {h_fin})" if x == "bloque"
-                                       else f"Toda la reserva ({ini} - {fin})"))
-        enviar = st.form_submit_button("Liberar", type="primary")
+        pin = st.text_input("PIN de tu reserva (4 números)", type="password", max_chars=4)
+        enviar = st.form_submit_button("Liberar horarios", type="primary")
+    st.caption("Solo se liberan los horarios cuya reserva tenga ese PIN.")
 
     if enviar:
-        if hash_pin(pin) != pin_hash:
-            st.session_state.pin_fallos[res_id] = fallos + 1
+        liberados, omitidos = liberar_bloques(sala, st.session_state.liberar_sel, pin)
+        if liberados == 0:
+            st.session_state.pin_fallos = fallos + 1
             quedan = MAX_INTENTOS_PIN - fallos - 1
-            st.error(f"❌ PIN incorrecto. Intentos restantes: {max(quedan, 0)}.")
+            st.error(f"❌ PIN incorrecto para esas reservas. Intentos restantes: {max(quedan, 0)}.")
             return
-        st.session_state.pin_fallos.pop(res_id, None)
-        if modo == "todo":
-            eliminar_reserva(res_id)
-            st.session_state.msg_ok = "✅ Tu reserva fue eliminada."
-        else:
-            liberar_bloque(res_id, h, h_fin)
-            st.session_state.msg_ok = f"✅ Horario {h} - {h_fin} liberado."
+        st.session_state.pin_fallos = 0
+        msg = f"✅ Horarios liberados: {liberados} bloque(s) de 30 min."
+        if omitidos:
+            msg += (f" {omitidos} bloque(s) no se liberaron porque el PIN no corresponde "
+                    f"a esas reservas.")
+        st.session_state.liberar_sel = set()
+        st.session_state.msg_ok = msg
         st.rerun()
 
 
@@ -496,42 +555,65 @@ def boton_reservar(key):
             dialogo_reserva()
 
 
+def boton_liberar(key):
+    if st.button("🗑️ Liberar horarios marcados", key=key):
+        if not st.session_state.liberar_sel:
+            st.warning("Primero haz clic en tus casillas naranjas que quieres liberar (se pintan de rojo).")
+        else:
+            dialogo_liberar()
+
+
 # ------------------------------------------------------------------
-# Cronograma semanal en vivo: clic en una casilla verde para elegirla,
-# clic en una casilla naranja (con tu PIN) para liberarla
+# Cronograma semanal en vivo:
+#   clic en casilla verde  -> la eliges para reservar (morado)
+#   clic en casilla naranja -> la marcas para liberar (rojo)
 # (se actualiza solo cada 10 segundos, con la hora de Lima)
 # ------------------------------------------------------------------
 @st.fragment(run_every="10s")
 def panel_en_vivo(sala):
-    c_sem, c_info, c_lim = st.columns([3, 7, 1], vertical_alignment="center")
-    with c_sem:
-        modo = st.radio("Semana", ["Esta semana", "Próxima semana"],
-                        horizontal=True, key="panel_modo", label_visibility="collapsed")
+    # Semanas del mes en curso (4 o 5 según el calendario). Al terminar el mes,
+    # el sistema pasa solo al mes siguiente.
+    ref = fecha_referencia()
+    semanas = semanas_del_mes(ref.year, ref.month)
+    if st.session_state.get("panel_semana") not in semanas:
+        st.session_state.panel_semana = lunes_actual() if lunes_actual() in semanas else semanas[0]
 
-    lunes = lunes_actual()
-    if modo == "Próxima semana":
-        lunes += datetime.timedelta(days=7)
+    c_sem, c_info, c_lim = st.columns([6, 5, 1], vertical_alignment="center")
+    with c_sem:
+        lunes = st.radio(
+            "Semana", semanas, key="panel_semana", horizontal=True,
+            label_visibility="collapsed",
+            format_func=lambda l: f"Semana {semanas.index(l) + 1}"
+                                  + (" · actual" if l == lunes_actual() else ""))
 
     dias = [lunes + datetime.timedelta(days=i) for i in range(5)]
 
     # En la misma fila: datos de la semana, o el resumen de lo que estás eligiendo
     sel = st.session_state.seleccion
+    rel = st.session_state.liberar_sel
     with c_info:
-        if sel:
-            resumen = " · ".join(f"{etiqueta_dia(f)[:3]} {f[8:10]}/{f[5:7]} {i}-{fn}"
-                                 for f, i, fn in rangos_de_seleccion(sel))
-            st.markdown(
-                f"<span style='background:{MORADO};color:white;padding:3px 10px;border-radius:4px;"
-                f"font-size:13px;font-weight:bold;'>Elegido: {resumen}</span>",
-                unsafe_allow_html=True)
+        if sel or rel:
+            partes = ""
+            if sel:
+                resumen = " · ".join(f"{etiqueta_dia(f)[:3]} {f[8:10]}/{f[5:7]} {i}-{fn}"
+                                     for f, i, fn in rangos_de_seleccion(sel))
+                partes += (f"<span style='background:{MORADO};color:white;padding:3px 10px;"
+                           f"border-radius:4px;font-size:13px;font-weight:bold;'>Reservar: {resumen}</span> ")
+            if rel:
+                resumen = " · ".join(f"{etiqueta_dia(f)[:3]} {f[8:10]}/{f[5:7]} {i}-{fn}"
+                                     for f, i, fn in rangos_de_seleccion(rel))
+                partes += (f"<span style='background:{ROJO};color:white;padding:3px 10px;"
+                           f"border-radius:4px;font-size:13px;font-weight:bold;'>Liberar: {resumen}</span>")
+            st.markdown(partes, unsafe_allow_html=True)
         else:
             st.markdown(
                 f"<span style='font-size:14px;'><b style='color:{AZUL_TIT};'>{html.escape(sala)}</b> · "
-                f"Semana del <b>{dias[0].strftime('%d/%m/%Y')}</b> al <b>{dias[4].strftime('%d/%m/%Y')}</b> "
+                f"{MESES[ref.month - 1]} {ref.year} · "
+                f"<b>{dias[0].strftime('%d/%m/%Y')}</b> al <b>{dias[4].strftime('%d/%m/%Y')}</b> "
                 f"<span style='opacity:.6;font-size:12px;'>· hora de Lima {ahora().strftime('%H:%M:%S')}</span></span>",
                 unsafe_allow_html=True)
     with c_lim:
-        if sel:
+        if sel or rel:
             st.button("Limpiar", on_click=limpiar_seleccion, key="btn_limpiar")
 
     df = reservas_semana(sala, lunes)
@@ -570,7 +652,7 @@ def panel_en_vivo(sala):
                 ocupado = dfd[(dfd["inicio"] <= h) & (dfd["fin"] > h)]
                 with fila[j + 1]:
                     if not ocupado.empty:
-                        # Reservado -> naranja (si estaba elegido, se descarta)
+                        # Reservado -> naranja (si estaba elegido para reservar, se descarta)
                         st.session_state.seleccion.discard(clave)
                         r = ocupado.iloc[0]
                         rid = int(r["id"])
@@ -593,6 +675,7 @@ def panel_en_vivo(sala):
 
                         if es_pasado(d, h_fin):
                             # Ya pasó: se ve naranja pero no se puede tocar
+                            st.session_state.liberar_sel.discard(clave)
                             linea_sup = "2px solid #fff" if es_primero else "0"
                             linea_inf = "2px solid #fff" if es_ultimo else "0"
                             rs = "4px" if es_primero else "0"
@@ -607,25 +690,32 @@ def panel_en_vivo(sala):
                                 f"border-top:{linea_sup};border-bottom:{linea_inf};"
                                 f"border-radius:{rs} {rs} {ri} {ri};'>{html.escape(texto)}</div>",
                                 unsafe_allow_html=True)
+                        elif clave in st.session_state.liberar_sel:
+                            # Marcado para liberar -> rojo
+                            boton("✕ Liberar", key=f"rel_{d}_{h}",
+                                  on_click=alternar_liberar, args=(clave,),
+                                  help=f"{tip} — clic para desmarcar")
                         else:
                             tipo = ("x" if (es_primero and es_ultimo) else
                                     "i" if es_primero else
                                     "f" if es_ultimo else "m")
                             etiqueta = md_escape(texto) if texto else "\u00a0"
-                            if boton(etiqueta, key=f"res_{tipo}_{rid}_{d}_{h}",
-                                     help=f"{tip} — clic para liberar con tu PIN"):
-                                st.session_state.res_click = (rid, str(d), h)
-                                st.rerun()      # recarga toda la app para abrir la ventana
+                            boton(etiqueta, key=f"res_{tipo}_{rid}_{d}_{h}",
+                                  on_click=alternar_liberar, args=(clave,),
+                                  help=f"{tip} — clic para marcar y liberar con tu PIN")
                     elif es_pasado(d, h_fin):
                         st.session_state.seleccion.discard(clave)
+                        st.session_state.liberar_sel.discard(clave)
                         st.markdown(
                             "<div style='height:var(--fila);background:#8882;border:1px solid #8881;"
                             "box-sizing:border-box;'></div>",
                             unsafe_allow_html=True)
-                    elif clave in st.session_state.seleccion:
-                        boton("✓ Elegido", key=f"sel_{d}_{h}", on_click=alternar, args=(clave,))
                     else:
-                        boton("Libre", key=f"lib_{d}_{h}", on_click=alternar, args=(clave,))
+                        st.session_state.liberar_sel.discard(clave)
+                        if clave in st.session_state.seleccion:
+                            boton("✓ Elegido", key=f"sel_{d}_{h}", on_click=alternar, args=(clave,))
+                        else:
+                            boton("Libre", key=f"lib_{d}_{h}", on_click=alternar, args=(clave,))
 
 
 # ------------------------------------------------------------------
@@ -829,21 +919,19 @@ with c_sala:
 
 panel_en_vivo(st.session_state.sala_sel)
 
-# Si se pulsó una casilla naranja, se abre la ventana para liberarla con el PIN
-_clic_reserva = st.session_state.pop("res_click", None)
-if _clic_reserva:
-    dialogo_liberar(*_clic_reserva)
-
-# Debajo de la tabla: botón de reservar + leyenda de colores
-c_btn, c_leyenda = st.columns([2, 5], vertical_alignment="center")
-with c_btn:
+# Debajo de la tabla: botones de reservar / liberar + leyenda de colores
+c_btn1, c_btn2, c_leyenda = st.columns([2, 2, 5], vertical_alignment="center")
+with c_btn1:
     boton_reservar("btn_reservar_abajo")
+with c_btn2:
+    boton_liberar("btn_liberar_abajo")
 with c_leyenda:
     st.markdown(
         f"<span style='font-size:13px;'>"
         f"<span style='color:{VERDE};'>■</span> Libre (clic para elegir) &nbsp; "
-        f"<span style='color:{MORADO};'>■</span> Elegido por ti &nbsp; "
-        f"<span style='color:{NARANJA};'>■</span> Reservado (clic + PIN para liberar) &nbsp; "
+        f"<span style='color:{MORADO};'>■</span> Elegido para reservar &nbsp; "
+        f"<span style='color:{NARANJA};'>■</span> Reservado (clic para marcarlo) &nbsp; "
+        f"<span style='color:{ROJO};'>■</span> Marcado para liberar &nbsp; "
         f"<span style='color:#888;'>■</span> Pasado</span>",
         unsafe_allow_html=True)
 
