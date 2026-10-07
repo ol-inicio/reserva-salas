@@ -32,6 +32,19 @@ MAX_INTENTOS_PIN = 5             # intentos fallidos de PIN permitidos por sesi√
 
 ZONA = ZoneInfo("America/Lima")
 
+# C√≥digos de los QR de cada sala:  ...app/?sala=piso3  /  ?sala=piso5  /  ?sala=piso7
+SALA_POR_CODIGO = {"3": SALAS[0], "5": SALAS[1], "7": SALAS[2]}
+
+
+def sala_desde_url():
+    """Sala indicada en el enlace del QR (por ejemplo ...streamlit.app/?sala=piso5)."""
+    try:
+        valor = str(st.query_params.get("sala", ""))
+    except Exception:
+        return None
+    return SALA_POR_CODIGO.get(re.sub(r"\D", "", valor))
+
+
 st.markdown(f"""
 <style>
 :root{{--fila:clamp(24px, calc((100vh - 290px) / 21), 40px);}}
@@ -334,7 +347,7 @@ if "admin_ok" not in st.session_state:
 if "admin_ver" not in st.session_state:
     st.session_state.admin_ver = 0
 if "sala_sel" not in st.session_state:
-    st.session_state.sala_sel = SALAS[0]
+    st.session_state.sala_sel = sala_desde_url() or SALAS[0]
 if "seleccion" not in st.session_state:
     st.session_state.seleccion = set()      # casillas libres elegidas para reservar: "YYYY-MM-DD|HH:MM"
 if "liberar_sel" not in st.session_state:
