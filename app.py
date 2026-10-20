@@ -8,6 +8,7 @@ import re
 import hashlib
 import pandas as pd
 from zoneinfo import ZoneInfo
+from sqlalchemy import create_engine, text, inspect
 
 # ------------------------------------------------------------------
 # Configuración general
@@ -21,7 +22,7 @@ NARANJA = "#FF5A00"
 MORADO = "#7B2FF7"      # casillas que el usuario está eligiendo para RESERVAR
 ROJO = "#E11D48"        # casillas que el usuario marcó para LIBERAR
 VERDE = "#2e9e4f"
-DB = "reservas.db"
+DB_LOCAL = "reservas.db"   # base antigua (solo se usa para migrar o si no hay DB_URL)
 SALAS = ["Sala Tercer Piso", "Sala Piso 5", "Sala Septimo Piso"]
 DIAS = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
 MESES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
@@ -243,86 +244,179 @@ def indice_fin(h):
         return HORAS.index(h)
     return len(HORAS) - 1 if a_min(h) > a_min(HORAS[-1]) else 0
 
+
 # ------------------------------------------------------------------
-# Base de datos
+# Base de datos (PERMANENTE: Postgres en Supabase / Neon)
+# Si no hay DB_URL en los Secrets, usa el archivo local (se borra en Streamlit Cloud).
 # ------------------------------------------------------------------
+def _url_db():
+    try:
+        url = st.secrets["DB_URL"]
+    except Exception:
+        return None
+    url = str(url).strip()
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg2://" + url[len("postgresql://"):]
+    return url
+
+
+@st.cache_resource
+def get_engine():
+    url = _url_db()
+    if url:
+        return create_engine(url, pool_pre_ping=True, pool_recycle=300)
+    return create_engine(f"sqlite:///{DB_LOCAL}")
+
+
+def usando_postgres():
+    return get_engine().dialect.name != "sqlite"
+
+
+def q(sql, **p):
+    """SELECT -> lista de tuplas."""
+    with get_engine().connect() as c:
+        return [tuple(f) for f in c.execute(text(sql), p).fetchall()]
+
+
+def df_q(sql, columnas, **p):
+    return pd.DataFrame(q(sql, **p), columns=columnas)
+
+
+def ejecutar(sql, **p):
+    with get_engine().begin() as c:
+        c.execute(text(sql), p)
+
+
+def importar_filas(filas):
+    """Inserta reservas (lista de dicts) que todavía no existen. Devuelve cuántas agregó."""
+    nuevas = 0
+    with get_engine().begin() as c:
+        for f in filas:
+            existe = c.execute(text(
+                "SELECT 1 FROM reservas WHERE sala=:sala AND fecha=:fecha AND inicio=:inicio "
+                "AND fin=:fin AND nombre=:nombre LIMIT 1"), f).fetchone()
+            if existe:
+                continue
+            c.execute(text(
+                "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) "
+                "VALUES (:sala,:fecha,:inicio,:fin,:nombre,:area,:pin_hash)"), f)
+            nuevas += 1
+    return nuevas
+
+
+def filas_desde_sqlite_local():
+    """Lee las reservas del archivo antiguo reservas.db (conserva el PIN)."""
+    if not os.path.exists(DB_LOCAL):
+        return []
+    conn = sqlite3.connect(DB_LOCAL)
+    try:
+        cols = [f[1] for f in conn.execute("PRAGMA table_info(reservas)").fetchall()]
+        if not cols:
+            return []
+        pin = "pin_hash" if "pin_hash" in cols else "NULL"
+        rows = conn.execute(
+            f"SELECT sala, fecha, inicio, fin, nombre, area, {pin} FROM reservas").fetchall()
+    finally:
+        conn.close()
+    return [dict(sala=r[0], fecha=str(r[1]), inicio=str(r[2]), fin=str(r[3]),
+                 nombre=r[4], area=r[5], pin_hash=r[6]) for r in rows]
+
+
+def _hhmm(v):
+    s = str(v).strip()
+    return s[:5] if len(s) >= 5 else s
+
+
+def filas_desde_excel(archivo):
+    """Lee un Excel descargado desde el panel de soporte (sin PIN)."""
+    d = pd.read_excel(archivo)
+    faltan = [c for c in ["Sala", "Fecha", "Inicio", "Fin", "Reservado por", "Área"] if c not in d.columns]
+    if faltan:
+        raise ValueError("Faltan columnas en el Excel: " + ", ".join(faltan))
+    filas = []
+    for _, r in d.iterrows():
+        if r[["Sala", "Fecha", "Inicio", "Fin", "Reservado por", "Área"]].isna().any():
+            continue
+        filas.append(dict(
+            sala=str(r["Sala"]).strip(),
+            fecha=str(pd.to_datetime(r["Fecha"]).date()),
+            inicio=_hhmm(r["Inicio"]), fin=_hhmm(r["Fin"]),
+            nombre=str(r["Reservado por"]).strip().upper(),
+            area=str(r["Área"]).strip().upper(),
+            pin_hash=None))
+    return filas
+
+
+@st.cache_resource
 def init_db():
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS reservas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sala TEXT,
-            fecha TEXT,
-            inicio TEXT,
-            fin TEXT,
-            nombre TEXT,
-            area TEXT
-        )
-    ''')
-    # Agrega la columna del PIN si la base de datos es anterior (conserva las reservas existentes)
-    columnas = [fila[1] for fila in c.execute("PRAGMA table_info(reservas)").fetchall()]
-    if "pin_hash" not in columnas:
-        c.execute("ALTER TABLE reservas ADD COLUMN pin_hash TEXT")
-    conn.commit()
-    conn.close()
+    """Crea las tablas y, la primera vez en Postgres, copia las reservas de reservas.db."""
+    eng = get_engine()
+    sqlite_ = eng.dialect.name == "sqlite"
+    id_def = "INTEGER PRIMARY KEY AUTOINCREMENT" if sqlite_ else "SERIAL PRIMARY KEY"
+    with eng.begin() as c:
+        c.execute(text(f'''
+            CREATE TABLE IF NOT EXISTS reservas (
+                id {id_def},
+                sala TEXT, fecha TEXT, inicio TEXT, fin TEXT,
+                nombre TEXT, area TEXT, pin_hash TEXT
+            )'''))
+        c.execute(text("CREATE TABLE IF NOT EXISTS meta (clave TEXT PRIMARY KEY, valor TEXT)"))
+    # Si la tabla es anterior y no tiene la columna del PIN, se agrega
+    cols = [col["name"] for col in inspect(eng).get_columns("reservas")]
+    if "pin_hash" not in cols:
+        with eng.begin() as c:
+            c.execute(text("ALTER TABLE reservas ADD COLUMN pin_hash TEXT"))
+
+    # Migración automática (una sola vez) desde el archivo antiguo
+    if not sqlite_:
+        try:
+            ya = q("SELECT 1 FROM meta WHERE clave='migrado_sqlite'")
+            if not ya:
+                importar_filas(filas_desde_sqlite_local())
+                ejecutar("INSERT INTO meta (clave, valor) VALUES ('migrado_sqlite','1')")
+        except Exception:
+            pass
+    return True
 
 
 init_db()
 
 
 def existe_traslape(sala, fecha, inicio, fin):
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    c.execute('''
-        SELECT * FROM reservas
-        WHERE sala = ? AND fecha = ?
-        AND NOT (time(fin) <= time(?) OR time(inicio) >= time(?))
-    ''', (sala, str(fecha), str(inicio), str(fin)))
-    solapados = c.fetchall()
-    conn.close()
-    return len(solapados) > 0
+    filas = q("SELECT 1 FROM reservas WHERE sala=:s AND fecha=:f "
+              "AND NOT (fin <= :i OR inicio >= :e) LIMIT 1",
+              s=sala, f=str(fecha), i=str(inicio), e=str(fin))
+    return len(filas) > 0
 
 
 def reservas_semana(sala, lunes):
     """Reservas de una sala de lunes a viernes de la semana indicada."""
     viernes = lunes + datetime.timedelta(days=4)
-    conn = sqlite3.connect(DB)
-    df = pd.read_sql_query(
-        "SELECT id, fecha, inicio, fin, nombre, area FROM reservas "
-        "WHERE sala = ? AND fecha BETWEEN ? AND ?",
-        conn, params=(sala, str(lunes), str(viernes)))
-    conn.close()
-    return df
+    return df_q("SELECT id, fecha, inicio, fin, nombre, area FROM reservas "
+                "WHERE sala=:s AND fecha BETWEEN :a AND :b",
+                ["id", "fecha", "inicio", "fin", "nombre", "area"],
+                s=sala, a=str(lunes), b=str(viernes))
 
 
 def obtener_reserva(res_id):
-    conn = sqlite3.connect(DB)
-    fila = conn.execute(
-        "SELECT id, sala, fecha, inicio, fin, nombre, area, pin_hash FROM reservas WHERE id = ?",
-        (int(res_id),)).fetchone()
-    conn.close()
-    return fila
+    filas = q("SELECT id, sala, fecha, inicio, fin, nombre, area, pin_hash "
+              "FROM reservas WHERE id=:i", i=int(res_id))
+    return filas[0] if filas else None
 
 
 def reserva_en_bloque(sala, fecha, h):
     """Id de la reserva que ocupa el bloque que empieza en h (o None)."""
-    conn = sqlite3.connect(DB)
-    fila = conn.execute(
-        "SELECT id FROM reservas WHERE sala = ? AND fecha = ? "
-        "AND time(inicio) <= time(?) AND time(fin) > time(?)",
-        (sala, str(fecha), h, h)).fetchone()
-    conn.close()
-    return fila[0] if fila else None
+    filas = q("SELECT id FROM reservas WHERE sala=:s AND fecha=:f "
+              "AND inicio <= :h AND fin > :h LIMIT 1", s=sala, f=str(fecha), h=h)
+    return filas[0][0] if filas else None
 
 
 def todas_las_reservas():
-    conn = sqlite3.connect(DB)
-    df = pd.read_sql_query(
-        "SELECT id, sala, fecha, inicio, fin, nombre, area FROM reservas "
-        "ORDER BY fecha, sala, inicio", conn)
-    conn.close()
-    return df
+    return df_q("SELECT id, sala, fecha, inicio, fin, nombre, area FROM reservas "
+                "ORDER BY fecha, sala, inicio",
+                ["id", "sala", "fecha", "inicio", "fin", "nombre", "area"])
 
 
 def a_excel(df):
@@ -438,14 +532,13 @@ def guardar_reservas(sala, rangos, nombre, area, pin, pin2):
             return False, (f"❌ **FECHA O HORA RESERVADA**: {etiqueta_dia(f)} {ini}-{fin} "
                            f"ya fue tomado por otra persona. Revisa el cronograma.")
 
-    conn = sqlite3.connect(DB)
-    c = conn.cursor()
-    for f, ini, fin in rangos:
-        c.execute(
-            "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) VALUES (?,?,?,?,?,?,?)",
-            (sala, f, ini, fin, nombre.strip().upper(), area.strip().upper(), hash_pin(pin)))
-    conn.commit()
-    conn.close()
+    with get_engine().begin() as c:
+        for f, ini, fin in rangos:
+            c.execute(text(
+                "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) "
+                "VALUES (:sala,:f,:i,:e,:n,:a,:p)"),
+                dict(sala=sala, f=f, i=ini, e=fin, n=nombre.strip().upper(),
+                     a=area.strip().upper(), p=hash_pin(pin)))
     return True, (f"✅ ¡Reserva realizada con éxito en la {sala} para {nombre.strip().upper()}! "
                   f"Recuerda tu PIN: lo necesitarás para liberar o eliminar tu reserva.")
 
@@ -519,17 +612,15 @@ def liberar_bloques(sala, claves, pin):
 
     # 3) Guardar: se borra la reserva original y se vuelven a crear los tramos que se conservan
     if plan:
-        conn = sqlite3.connect(DB)
-        c = conn.cursor()
-        for rid, sala_r, fecha, nombre, area, pin_hash, rangos in plan:
-            c.execute("DELETE FROM reservas WHERE id = ?", (rid,))
-            for a, b in rangos:
-                c.execute(
-                    "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) "
-                    "VALUES (?,?,?,?,?,?,?)",
-                    (sala_r, fecha, min_a_hhmm(a), min_a_hhmm(b), nombre, area, pin_hash))
-        conn.commit()
-        conn.close()
+        with get_engine().begin() as c:
+            for rid, sala_r, fecha, nombre, area, pin_hash, rangos in plan:
+                c.execute(text("DELETE FROM reservas WHERE id=:i"), {"i": rid})
+                for a, b in rangos:
+                    c.execute(text(
+                        "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area, pin_hash) "
+                        "VALUES (:sala,:f,:i,:e,:n,:a,:p)"),
+                        dict(sala=sala_r, f=fecha, i=min_a_hhmm(a), e=min_a_hhmm(b),
+                             n=nombre, a=area, p=pin_hash))
     return liberados, omitidos
 
 
@@ -766,6 +857,13 @@ def seccion_admin():
         st.session_state.admin_ok = False
         st.rerun()
 
+    # Estado de la base de datos
+    if usando_postgres():
+        st.success("🟢 Base de datos permanente conectada (las reservas NO se pierden al reiniciar).")
+    else:
+        st.error("🔴 Sin DB_URL en Secrets: se está usando un archivo temporal. "
+                 "Las reservas SE BORRAN cuando la app se duerme o reinicia.")
+
     df = todas_las_reservas()
 
     # ---------------- Descargar Excel ----------------
@@ -781,6 +879,33 @@ def seccion_admin():
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
     st.divider()
+
+    # ---------------- Importar reservas anteriores ----------------
+    if usando_postgres():
+        st.markdown(f"#### <span style='color:{AZUL};'>📤 Recuperar reservas anteriores</span>",
+                    unsafe_allow_html=True)
+        st.caption("Agrega reservas que no estén en la base permanente (no duplica las que ya existen).")
+
+        n_local = len(filas_desde_sqlite_local())
+        st.write(f"Reservas encontradas en el archivo antiguo `reservas.db`: **{n_local}**")
+        if st.button("Copiar reservas de reservas.db", disabled=(n_local == 0), key=f"mig_db_{ver}"):
+            n = importar_filas(filas_desde_sqlite_local())
+            st.session_state.admin_ver += 1
+            st.session_state.flash = f"✅ Se copiaron {n} reserva(s) nuevas (con su PIN)."
+            st.rerun()
+
+        archivo = st.file_uploader("…o sube un Excel descargado antes (quedan sin PIN: solo soporte las puede liberar)",
+                                   type=["xlsx"], key=f"up_excel_{ver}")
+        if archivo is not None and st.button("Importar Excel", key=f"mig_xl_{ver}"):
+            try:
+                n = importar_filas(filas_desde_excel(archivo))
+                st.session_state.admin_ver += 1
+                st.session_state.flash = f"✅ Se importaron {n} reserva(s) desde el Excel."
+                st.rerun()
+            except Exception as e:
+                st.error(f"No se pudo importar: {e}")
+
+        st.divider()
 
     # ---------------- Editar reservas ----------------
     st.markdown(f"#### <span style='color:{AZUL};'>✏️ Editar fechas y reservas</span>",
@@ -857,21 +982,21 @@ def seccion_admin():
                 ids_editados = set(f["id"] for f in filas if f["id"] is not None)
                 borrados = ids_originales - ids_editados
 
-                conn = sqlite3.connect(DB)
-                c = conn.cursor()
-                for i in borrados:
-                    c.execute("DELETE FROM reservas WHERE id = ?", (i,))
-                for f in filas:
-                    if f["id"] is None:
-                        c.execute(
-                            "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area) VALUES (?,?,?,?,?,?)",
-                            (f["sala"], f["fecha"], f["inicio"], f["fin"], f["nombre"], f["area"]))
-                    else:
-                        c.execute(
-                            "UPDATE reservas SET sala=?, fecha=?, inicio=?, fin=?, nombre=?, area=? WHERE id=?",
-                            (f["sala"], f["fecha"], f["inicio"], f["fin"], f["nombre"], f["area"], f["id"]))
-                conn.commit()
-                conn.close()
+                with get_engine().begin() as c:
+                    for i in borrados:
+                        c.execute(text("DELETE FROM reservas WHERE id=:i"), {"i": int(i)})
+                    for f in filas:
+                        datos = dict(sala=f["sala"], fecha=f["fecha"], inicio=f["inicio"],
+                                     fin=f["fin"], nombre=f["nombre"], area=f["area"])
+                        if f["id"] is None:
+                            c.execute(text(
+                                "INSERT INTO reservas (sala, fecha, inicio, fin, nombre, area) "
+                                "VALUES (:sala,:fecha,:inicio,:fin,:nombre,:area)"), datos)
+                        else:
+                            datos["id"] = f["id"]
+                            c.execute(text(
+                                "UPDATE reservas SET sala=:sala, fecha=:fecha, inicio=:inicio, "
+                                "fin=:fin, nombre=:nombre, area=:area WHERE id=:id"), datos)
 
                 st.session_state.admin_ver += 1
                 st.session_state.flash = "✅ Cambios guardados correctamente."
@@ -889,10 +1014,7 @@ def seccion_admin():
                                    key=f"dia_borrar_{ver}")
         ok_dia = st.checkbox("Confirmo borrar ese día", key=f"ok_dia_{ver}")
         if st.button("🗑️ Borrar día", disabled=not ok_dia):
-            conn = sqlite3.connect(DB)
-            conn.execute("DELETE FROM reservas WHERE fecha = ?", (str(dia_borrar),))
-            conn.commit()
-            conn.close()
+            ejecutar("DELETE FROM reservas WHERE fecha = :f", f=str(dia_borrar))
             st.session_state.admin_ver += 1
             st.session_state.flash = f"✅ Reservas del {dia_borrar.strftime('%d/%m/%Y')} eliminadas."
             st.rerun()
@@ -900,10 +1022,7 @@ def seccion_admin():
         st.write("Borrar **TODAS** las reservas de todas las salas y fechas")
         ok_todo = st.checkbox("Confirmo borrar TODO (no se puede deshacer)", key=f"ok_todo_{ver}")
         if st.button("🗑️ Borrar todo", disabled=not ok_todo):
-            conn = sqlite3.connect(DB)
-            conn.execute("DELETE FROM reservas")
-            conn.commit()
-            conn.close()
+            ejecutar("DELETE FROM reservas")
             st.session_state.admin_ver += 1
             st.session_state.flash = "✅ Todas las reservas fueron eliminadas."
             st.rerun()
@@ -915,6 +1034,10 @@ def seccion_admin():
 if "msg_ok" in st.session_state:
     st.success(st.session_state.pop("msg_ok"))
     st.toast("Listo", icon="✅")
+
+if not usando_postgres():
+    st.warning("⚠️ Base de datos temporal: falta configurar DB_URL en Secrets. "
+               "Las reservas se perderán al reiniciar la app.")
 
 if os.path.exists("logo.png"):
     c_logo, c_tit, c_sala = st.columns([1, 4, 9], vertical_alignment="center")
